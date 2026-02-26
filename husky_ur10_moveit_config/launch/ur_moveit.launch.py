@@ -211,6 +211,11 @@ def launch_setup(context, *args, **kwargs):
         "warehouse_host": warehouse_sqlite_path,
     }
 
+    sensors_3d_config = load_yaml(
+        "husky_ur10_moveit_config",
+        "config/sensors_3d.yaml",
+    )
+
     # Start the actual move_group node/action server
     move_group_node = Node(
         package="moveit_ros_move_group",
@@ -226,6 +231,7 @@ def launch_setup(context, *args, **kwargs):
             trajectory_execution,
             moveit_controllers,
             planning_scene_monitor_parameters,
+            sensors_3d_config,
             {"use_sim_time": use_sim_time},
             warehouse_ros_config,
         ],
