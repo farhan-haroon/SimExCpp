@@ -1,6 +1,7 @@
 sensors:
-  - velodyne
-velodyne:
+  - lidar
+  - depth_camera
+lidar:
     sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
     point_cloud_topic: /fusion
     max_range: 1.5
@@ -10,3 +11,14 @@ velodyne:
     max_update_rate: 5.0
     filtered_cloud_topic: /lidar/filtered_points
     octomap_resolution: 0.01
+depth_camera:
+    sensor_plugin: occupancy_map_monitor/DepthImageOctomapUpdater
+    image_topic: /ee_camera/depth/image_raw
+    queue_size: 1
+    near_clipping_plane_distance: 0.0
+    far_clipping_plane_distance: 1.5
+    shadow_threshold: 0.2
+    padding_scale: 1.0
+    max_update_rate: 2.0
+    filtered_cloud_topic: /ee_camera/filtered_points  
+    octomap_resolution: 0.01  
