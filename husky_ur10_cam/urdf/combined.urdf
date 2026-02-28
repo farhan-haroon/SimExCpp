@@ -794,7 +794,7 @@
     <material>Gazebo/Orange</material>
     <sensor name="depth_camera" type="depth">
       <always_on>true</always_on>
-      <visualize>true</visualize>
+      <visualize>false</visualize>
       <update_rate>5</update_rate>
       <pose>0 0 0 0 0 0</pose>
       <depth_camera name="depth_cam">
