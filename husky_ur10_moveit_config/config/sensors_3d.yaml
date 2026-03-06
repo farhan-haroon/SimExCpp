@@ -1,7 +1,8 @@
 sensors:
-  - lidar
+  - front_lidar
+  - rear_lidar
 #   - depth_camera
-lidar:
+front_lidar:
     sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
     point_cloud_topic: /velodyne_points
     queue_size: 1
@@ -10,7 +11,17 @@ lidar:
     padding_offset: 0.1
     padding_scale: 1.0
     max_update_rate: 1.0
-    filtered_cloud_topic: /lidar/filtered_points
+    filtered_cloud_topic: /front_lidar/filtered_points
+rear_lidar:
+    sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+    point_cloud_topic: /velodyne2_points
+    queue_size: 1
+    max_range: 1.5
+    point_subsample: 1
+    padding_offset: 0.1
+    padding_scale: 1.0
+    max_update_rate: 1.0
+    filtered_cloud_topic: /rear_lidar/filtered_points    
 depth_camera:
     sensor_plugin: occupancy_map_monitor/DepthImageOctomapUpdater
     image_topic: /ee_camera/depth/image_raw

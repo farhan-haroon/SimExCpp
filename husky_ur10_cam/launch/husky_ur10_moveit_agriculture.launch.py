@@ -82,28 +82,54 @@ def generate_launch_description():
         output="screen",
     )
 
+    concat_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare("pointcloud_concatenate_ros2"),
+                "launch",
+                "concat.launch.py",
+            ])
+        )
+    )
+
     pcl_to_ls = Node(
         package = "pointcloud_to_laserscan",
         executable = "pointcloud_to_laserscan_node",
         name = "pointcloud_to_laserscan",
         remappings = [
-            ('cloud_in', '/velodyne_points'),
+            ('cloud_in', '/fusion'),
             ('scan', '/scan')
         ],
         parameters = [{
             'target_frame': 'velodyne',
             'transform_tolerance': 0.05,
-            'min_height': -0.65,
-            'max_height': 0.65,
+            'min_height': -0.43,
+            'max_height': 0.25,
             'angle_min': -3.14,
             'angle_max': 3.14,
             'angle_increment': 0.0087,
             'scan_time': 0.05,
-            'range_min': 0.2,
-            'range_max': 10.0,
+            'range_min': 1.0,
+            'range_max': 100.0,
             'use_inf': True,
             'inf_epsilon': 2.0
         }]
+    )
+
+    moveit_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            [
+                FindPackageShare("husky_ur10_moveit_config"),
+                "/launch",
+                "/ur_moveit.launch.py",
+            ]
+        ),
+        launch_arguments={
+            "ur_type": "ur10",
+            "use_sim_time": "true",
+            "launch_rviz": "true",
+            "use_fake_hardware": "false",   # IMPORTANT
+        }.items(),
     )
 
     ld = LaunchDescription()
@@ -131,6 +157,14 @@ def generate_launch_description():
         )
     )
 
+    ld.add_action(
+        TimerAction(
+            period=8.0,
+            actions=[moveit_launch]
+        )
+    )
+
+    ld.add_action(concat_launch)
     ld.add_action(pcl_to_ls)
 
     return ld

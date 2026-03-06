@@ -311,7 +311,7 @@
     <material>Gazebo/Grey</material>
   </gazebo>
   <joint name="velodyne_mount_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0.30 0 0.141"/>
+    <origin rpy="0 0 0" xyz="0.32 0 0.141"/>
     <parent link="base_link"/>
     <child link="velodyne_mount"/>
   </joint>
@@ -406,7 +406,7 @@
     <material>Gazebo/Grey</material>
   </gazebo>
   <joint name="velodyne2_mount_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="-0.30 0 0.141"/>
+    <origin rpy="0 0 0" xyz="-0.32 0 0.141"/>
     <parent link="base_link"/>
     <child link="velodyne2_mount"/>
   </joint>

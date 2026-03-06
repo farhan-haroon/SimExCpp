@@ -31,4 +31,9 @@ install(DIRECTORY launch worlds urdf config meshes models rviz
   DESTINATION share/${PROJECT_NAME}/
 )
 
+install(PROGRAMS
+  scripts/roi_voxels.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
