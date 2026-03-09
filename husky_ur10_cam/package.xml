@@ -16,6 +16,8 @@
   <depend>tf2</depend>
   <depend>gazebo_ros_pkgs</depend>
   <depend>lms1xx</depend>
+  <depend>moveit_ros_planning_interface</depend>
+  <depend>std_srvs</depend>
 
   <build_depend>xacro</build_depend>
 

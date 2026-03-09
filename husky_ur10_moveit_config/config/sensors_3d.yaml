@@ -1,6 +1,6 @@
 sensors:
   - front_lidar
-  - rear_lidar
+#   - rear_lidar
 #   - depth_camera
 front_lidar:
     sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
