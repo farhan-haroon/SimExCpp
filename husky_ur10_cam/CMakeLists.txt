@@ -30,6 +30,7 @@ if(BUILD_TESTING)
 endif()
 
 add_executable(helical_path src/helical_path.cpp)
+add_executable(test_helix src/test_helix.cpp)
 
 ament_target_dependencies(
   helical_path
@@ -39,8 +40,17 @@ ament_target_dependencies(
   std_srvs
 )
 
+ament_target_dependencies(
+  test_helix
+  rclcpp
+  geometry_msgs
+  moveit_ros_planning_interface
+  std_srvs
+)
+
 install(TARGETS
   helical_path
+  test_helix
   DESTINATION lib/${PROJECT_NAME}
 )
 
