@@ -800,8 +800,8 @@
       <depth_camera name="depth_cam">
         <horizontal_fov>2</horizontal_fov>
         <image>
-          <width>640</width>
-          <height>480</height>
+          <width>1920</width>
+          <height>1080</height>
           <format>R8G8B8</format>
         </image>
         <clip>

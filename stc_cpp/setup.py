@@ -21,10 +21,12 @@ setup(
     entry_points={
         'console_scripts': [
         	'offline = stc_cpp.planner_offline:main',
-            'online = stc_cpp.planner_online:main',
-            'incremental = stc_cpp.incremental_planner_online:main',
-            'tester_path = stc_cpp.tester_path:main',
-            'test = stc_cpp.test:main',
-        ],
-    },
-)
+                'online = stc_cpp.planner_online:main',
+                'incremental = stc_cpp.incremental_planner_online:main',
+                'tester_path = stc_cpp.tester_path:main',
+                'test = stc_cpp.test:main',
+                'stc = stc_cpp.stc:main',
+                'stc_test = stc_cpp.stc_test:main'
+            ],
+        },
+    )

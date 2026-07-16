@@ -231,7 +231,7 @@ def launch_setup(context, *args, **kwargs):
             trajectory_execution,
             moveit_controllers,
             planning_scene_monitor_parameters,
-            sensors_3d_config,
+            # sensors_3d_config,
             {"use_sim_time": use_sim_time},
             warehouse_ros_config,
         ],
@@ -362,7 +362,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "moveit_config_file",
-            default_value="ur.srdf.xacro",
+            default_value="ur.srdf",
             description="MoveIt SRDF/XACRO description file with the robot.",
         )
     )

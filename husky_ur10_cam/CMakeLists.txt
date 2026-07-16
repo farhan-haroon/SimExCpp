@@ -29,37 +29,12 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-add_executable(helical_path src/helical_path.cpp)
-add_executable(test_helix src/test_helix.cpp)
-
-ament_target_dependencies(
-  helical_path
-  rclcpp
-  geometry_msgs
-  moveit_ros_planning_interface
-  std_srvs
-)
-
-ament_target_dependencies(
-  test_helix
-  rclcpp
-  geometry_msgs
-  moveit_ros_planning_interface
-  std_srvs
-)
-
-install(TARGETS
-  helical_path
-  test_helix
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 install(DIRECTORY launch worlds urdf config meshes models rviz
   DESTINATION share/${PROJECT_NAME}/
 )
 
 install(PROGRAMS
-  scripts/roi_voxels.py
+  scripts/preset_views.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
