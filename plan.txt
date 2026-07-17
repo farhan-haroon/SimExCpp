@@ -1,0 +1,9 @@
+I want to implement this custom algorithm along with the STC algorithm simultaneously running. The algorithm will have the following steps:
+
+0. The STC algo will pause for some time after reaching each waypoint until the obj detection algo prompts to continue
+1. The STC algorithm will start from the present location cell and the robot will use manipulator to look round itself
+2. It will try to find some objet of interest within the current cell usign some object detection algo like YOLO
+3. If found in current cell with confidence > threshold, report FOUND else if confidence < threshold, reject -  the manipulator may seek to look through more viewpoints to get a better confidence score
+4. While looking in the current cell, the manipulator may also look in the neighbouring cells for the object and if the object is found with confidence > threshold, report FOUND else if confidence < threshold, save the camera view in a database with the repective cell location of the object's cell
+5. When visting that cell or passing close by it, get newer views of the object and together use them for increasing the confidence to either report FOUND or reject the object
+6. Finally at the end of the STC coverage, report the possible locations (if any) with the confidence score
