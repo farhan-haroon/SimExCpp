@@ -247,7 +247,7 @@ def launch_setup(context, *args, **kwargs):
         executable="rviz2",
         name="rviz2_moveit",
         output="log",
-        arguments=["-d", rviz_config_file],
+        arguments=["-d", rviz_config_file, "--ros-args", "--log-level", "warn"],
         parameters=[
             robot_description,
             robot_description_semantic,

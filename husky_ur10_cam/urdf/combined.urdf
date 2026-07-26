@@ -797,18 +797,18 @@
       <visualize>false</visualize>
       <update_rate>5</update_rate>
       <pose>0 0 0 0 0 0</pose>
-      <depth_camera name="depth_cam">
-        <horizontal_fov>2</horizontal_fov>
+      <camera name="depth_cam">
+        <horizontal_fov>1.0</horizontal_fov>
         <image>
-          <width>1920</width>
-          <height>1080</height>
+          <width>640</width>
+          <height>480</height>
           <format>R8G8B8</format>
         </image>
         <clip>
           <near>0.1</near>
           <far>10.0</far>
         </clip>
-      </depth_camera>
+      </camera>
       <plugin filename="libgazebo_ros_camera.so" name="depth_camera_driver">
         <frame_name>camera_optical_link</frame_name>
         <camera_name>ee_camera</camera_name>

@@ -40760,7 +40760,7 @@
         <self_collide>0</self_collide>
         <kinematic>0</kinematic>
       </link>
-      <link name='window::link_2'>
+      <link name='window_2::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0.9 0 -0 0</pose>
           <geometry>
@@ -41240,7 +41240,7 @@
         <self_collide>0</self_collide>
         <kinematic>0</kinematic>
       </link>
-      <link name='door_3d::link_1'>
+      <link name='door_3d_2::link_1'>
         <visual name='visual'>
           <pose frame=''>0 0 0 0 -0 0</pose>
           <geometry>
@@ -41286,7 +41286,7 @@
         <self_collide>0</self_collide>
         <kinematic>0</kinematic>
       </link>
-      <link name='door_3d::link_2'>
+      <link name='door_3d_2::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0 0 -0 0</pose>
           <geometry>
@@ -41334,7 +41334,7 @@
       </link>
       <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
-      <link name='window::link_2'>
+      <link name='window_3::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0.9 0 -0 0</pose>
           <geometry>
@@ -41380,7 +41380,7 @@
       </link>
       <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
-      <link name='window::link_2'>
+      <link name='window_4::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0.9 0 -0 0</pose>
           <geometry>
@@ -41665,7 +41665,7 @@
         <self_collide>0</self_collide>
         <kinematic>0</kinematic>
       </link>
-      <link name='window::link_2'>
+      <link name='window_5::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0.9 0 -0 0</pose>
           <geometry>
@@ -41711,7 +41711,7 @@
       </link>
       <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
-      <link name='window::link_2'>
+      <link name='window_6::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0.9 0 -0 0</pose>
           <geometry>
@@ -41918,7 +41918,7 @@
         <self_collide>0</self_collide>
         <kinematic>0</kinematic>
       </link>
-      <link name='window::link_2'>
+      <link name='window_7::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0.9 0 -0 0</pose>
           <geometry>
@@ -42086,7 +42086,7 @@
         <self_collide>0</self_collide>
         <kinematic>0</kinematic>
       </link>
-      <link name='door_3d::link_1'>
+      <link name='door_3d_3::link_1'>
         <visual name='visual'>
           <pose frame=''>0 0 0 0 -0 0</pose>
           <geometry>
@@ -42132,7 +42132,7 @@
         <self_collide>0</self_collide>
         <kinematic>0</kinematic>
       </link>
-      <link name='door_3d::link_2'>
+      <link name='door_3d_3::link_2'>
         <visual name='visual'>
           <pose frame=''>0 0 0 0 -0 0</pose>
           <geometry>

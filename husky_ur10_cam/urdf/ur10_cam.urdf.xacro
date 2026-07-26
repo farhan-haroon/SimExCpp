@@ -185,8 +185,8 @@
       <visualize>true</visualize>
       <update_rate>10</update_rate>
       <pose>0 0 0 0 0 0</pose>
-      <depth_camera name="depth_cam">
-        <horizontal_fov>2</horizontal_fov>
+      <camera name="depth_cam">
+        <horizontal_fov>1.0</horizontal_fov>
         <image>
           <width>640</width>
           <height>480</height>
@@ -196,7 +196,7 @@
           <near>0.1</near>
           <far>10.0</far>
         </clip>
-      </depth_camera>
+      </camera>
 
       <plugin name="gazebo_ros_camera" filename="libgazebo_ros_camera.so">
         <frame_name>camera_optical_link</frame_name>

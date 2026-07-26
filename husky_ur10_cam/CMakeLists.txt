@@ -35,6 +35,8 @@ install(DIRECTORY launch worlds urdf config meshes models rviz
 
 install(PROGRAMS
   scripts/preset_views.py
+  scripts/test_ee_pose_ik.py
+  scripts/ee_camera_environment_scan.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
