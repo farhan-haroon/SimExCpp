@@ -37,6 +37,7 @@ install(PROGRAMS
   scripts/preset_views.py
   scripts/test_ee_pose_ik.py
   scripts/ee_camera_environment_scan.py
+  scripts/object_search_action_server.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

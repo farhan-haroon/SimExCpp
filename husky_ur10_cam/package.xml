@@ -13,11 +13,14 @@
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
   <depend>tf2</depend>
   <depend>gazebo_ros_pkgs</depend>
   <depend>lms1xx</depend>
   <depend>moveit_ros_planning_interface</depend>
   <depend>std_srvs</depend>
+  <depend>custom_interfaces</depend>
 
   <build_depend>xacro</build_depend>
 

@@ -19,7 +19,8 @@ IK) before scanning starts and again after it ends, unless disabled with
 --skip-start-home / --skip-return-home.
 
     A YOLO detector (detect_objects()) also runs at every phase 1
-    waypoint, looking for --object (default "chair"). If it reports
+    waypoint, looking for any of --objects (default ["chair"], one class
+    or several). If it reports
     confidence >= DETECTION_CONFIDENCE_THRESHOLD (fixed at 80%, not
     CLI-configurable), that's logged and recorded as FOUND - but the
     sweep keeps going through every remaining waypoint rather than
@@ -62,6 +63,7 @@ on first use) and cached for the life of the process.
 
 Usage:
     ros2 run husky_ur10_cam ee_camera_environment_scan.py
+    ros2 run husky_ur10_cam ee_camera_environment_scan.py --objects chair book laptop
     ros2 run husky_ur10_cam ee_camera_environment_scan.py --dry-run
     ros2 run husky_ur10_cam ee_camera_environment_scan.py --skip-phase1
 """
@@ -79,6 +81,9 @@ from rclpy.action import ActionClient
 from sensor_msgs.msg import Image, PointCloud2
 from tf2_ros import Buffer, TransformListener
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import ColorRGBA
+from visualization_msgs.msg import Marker, MarkerArray
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
 from moveit_msgs.action import MoveGroup as MoveGroupAction
 from moveit_msgs.msg import (
     PositionIKRequest,
@@ -92,6 +97,7 @@ from moveit_msgs.srv import GetPositionIK
 
 PLANNING_GROUP = "ur10_ur_manipulator"
 CAMERA_FRAME = "camera_optical_link"
+MAP_FRAME = "map"
 MOVE_TIMEOUT = 30.0
 
 DEFAULT_YOLO_WEIGHTS = os.path.expanduser("~/husky_ws/yolov8n.pt")
@@ -313,6 +319,33 @@ def measure_bbox_distance(points_msg, bbox):
     return math.sqrt(sum(c * c for c in point))
 
 
+def back_project_object_position(node, bbox, points_msg=None):
+    """Best-effort actual 3D position (base_link) of whatever's at bbox's
+    center pixel, via depth back-projection through the point cloud - the
+    same math compute_3d_approach_pose uses to plan a move. This is the
+    OBJECT's position, not the camera's - callers recording a "found"
+    location should use this instead of the camera/waypoint pose, which
+    can be arbitrarily far from the object along the line of sight (e.g.
+    a phase 1 sweep waypoint is on a fixed ~0.6m orbit around the robot;
+    the object it's looking at could be meters further out).
+
+    Pass an already-captured points_msg to avoid a redundant capture
+    (e.g. phase 1's per-waypoint frame); otherwise one is captured here.
+    Returns None if depth or the camera's TF pose isn't available at that
+    moment - caller should fall back to something coarser."""
+    if points_msg is None:
+        points_msg = node.capture_points(timeout=2.0)
+    cx = int((bbox[0] + bbox[2]) / 2)
+    cy = int((bbox[1] + bbox[3]) / 2)
+    point_cam = get_point_from_cloud(points_msg, cx, cy)
+    if point_cam is None:
+        return None
+    camera_xyz, camera_quat = node.get_camera_pose(timeout=2.0)
+    if camera_xyz is None:
+        return None
+    return transform_point_to_base_link(point_cam, camera_xyz, camera_quat)
+
+
 def compute_3d_approach_pose(object_xyz, camera_xyz, standoff, max_step=None):
     """New camera (xyz, quat), both in base_link, that moves toward
     `object_xyz` along the current camera->object line, aiming to end up
@@ -369,8 +402,8 @@ def command_to_offset(action, amount):
 
 
 class EnvironmentScanner(Node):
-    def __init__(self, image_topic, points_topic=None):
-        super().__init__("ee_camera_environment_scan")
+    def __init__(self, image_topic, points_topic=None, node_name="ee_camera_environment_scan"):
+        super().__init__(node_name)
         self.ik_cli = self.create_client(GetPositionIK, "/compute_ik")
         self.move_ac = ActionClient(self, MoveGroupAction, "/move_action")
         self._latest_image = None
@@ -384,6 +417,17 @@ class EnvironmentScanner(Node):
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        # Transient-local so RViz picks up the last-published markers even
+        # if it's (re)started after this node already found something.
+        marker_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.found_marker_pub = self.create_publisher(
+            MarkerArray, "found_objects_markers", marker_qos)
 
     def _image_cb(self, msg):
         self._latest_image = msg
@@ -424,6 +468,77 @@ class EnvironmentScanner(Node):
             except Exception:
                 rclpy.spin_once(self, timeout_sec=0.1)
         return None, None
+
+    def publish_found_markers(self, found, timeout=2.0):
+        """Publish an RViz MarkerArray (a labeled sphere per object) in
+        MAP_FRAME for every confirmed find. Each found dict's
+        "position_base_link" is transformed map <- base_link via TF (the
+        map -> odom -> base_link chain AMCL/odometry already broadcast) -
+        cheap and exact, since the base doesn't move during a search; no
+        tf2_geometry_msgs needed, just _rotate_vector_by_quat like the
+        rest of this file's transforms. Silently does nothing if there's
+        nothing found or the map transform isn't available (e.g. no
+        localization running - standalone/dry testing)."""
+        if not found:
+            return
+        from rclpy.time import Time
+        deadline = time.time() + timeout
+        map_xyz = map_quat = None
+        while time.time() < deadline:
+            try:
+                t = self.tf_buffer.lookup_transform(MAP_FRAME, "base_link", Time())
+                map_xyz = (t.transform.translation.x, t.transform.translation.y,
+                           t.transform.translation.z)
+                map_quat = (t.transform.rotation.x, t.transform.rotation.y,
+                            t.transform.rotation.z, t.transform.rotation.w)
+                break
+            except Exception:
+                rclpy.spin_once(self, timeout_sec=0.1)
+        if map_xyz is None:
+            self.get_logger().warn(
+                f"publish_found_markers: no {MAP_FRAME}->base_link transform "
+                "available, skipping markers"
+            )
+            return
+
+        stamp = self.get_clock().now().to_msg()
+        markers = MarkerArray()
+        for i, f in enumerate(found):
+            p_map = tuple(m + r for m, r in
+                           zip(map_xyz, _rotate_vector_by_quat(f["position_base_link"], map_quat)))
+
+            sphere = Marker()
+            sphere.header.frame_id = MAP_FRAME
+            sphere.header.stamp = stamp
+            sphere.ns = "found_objects"
+            sphere.id = i
+            sphere.type = Marker.SPHERE
+            sphere.action = Marker.ADD
+            sphere.pose.position.x, sphere.pose.position.y, sphere.pose.position.z = p_map
+            sphere.pose.orientation.w = 1.0
+            sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.2
+            sphere.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.9)
+            markers.markers.append(sphere)
+
+            label = Marker()
+            label.header.frame_id = MAP_FRAME
+            label.header.stamp = stamp
+            label.ns = "found_objects_labels"
+            label.id = i
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x, label.pose.position.y = p_map[0], p_map[1]
+            label.pose.position.z = p_map[2] + 0.25
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.15
+            label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.9)
+            label.text = f"{f.get('label', '?')} ({f.get('confidence', 0.0):.2f})"
+            markers.markers.append(label)
+
+        self.found_marker_pub.publish(markers)
+        self.get_logger().info(
+            f"Published {len(found)} found-object marker(s) in {MAP_FRAME} frame"
+        )
 
     def capture_image(self, timeout=5.0):
         """Block briefly for a fresh frame after this call; return the
@@ -722,11 +837,19 @@ def _save_detection_image(cv_img, detections, step, save_dir, label_hint=DEFAULT
 
 
 def detect_objects(image_msg, context):
-    """YOLOv8 detector for context["target_label"] (default "chair"),
-    run once per phase 1 waypoint. Needs to be fast since it runs at every
-    stop of the fixed sweep, not just in phase 2. Confidence thresholding
-    (FOUND vs. save-as-candidate) is decided by the caller
-    (run_phase1_helix), not here - this just reports what it sees.
+    """YOLOv8 detector for context["target_labels"] (a list of YOLO/COCO
+    class names; a single-element list for a single target - a bare
+    context["target_label"] string is also accepted for backward compat
+    and normalized to a one-element list). Detects ANY of them in one
+    pass, so a multi-object search doesn't need to repeat the sweep per
+    object - phase 1 passes the full list; phase 2 passes just the one
+    class it's currently investigating (a specific candidate is always
+    one object), so it isn't distracted by a different target class
+    sharing the frame. Run once per phase 1 waypoint - needs to be fast
+    since it runs at every stop of the fixed sweep, not just in phase 2.
+    Confidence thresholding (FOUND vs. save-as-candidate) is decided by
+    the caller (run_phase1_helix), not here - this just reports what it
+    sees.
 
     `context["waypoint_xyz"]`/`context["waypoint_quat"]` (the camera's
     pose in base_link for this waypoint) are provided but not currently
@@ -748,7 +871,9 @@ def detect_objects(image_msg, context):
          "bbox": [x1, y1, x2, y2], "image_path": str or None}
     """
     weights_path = context.get("yolo_weights", DEFAULT_YOLO_WEIGHTS)
-    target_label = context.get("target_label", DEFAULT_OBJECT)
+    target_labels = context.get("target_labels")
+    if target_labels is None:
+        target_labels = [context.get("target_label", DEFAULT_OBJECT)]
     save_dir = context.get("save_detections_dir")
     model = _get_yolo(weights_path)
 
@@ -758,7 +883,7 @@ def detect_objects(image_msg, context):
     detections = []
     for box in results.boxes:
         label = model.names[int(box.cls[0])]
-        if label != target_label:
+        if label not in target_labels:
             continue
         conf = float(box.conf[0])
         xyxy = [round(v, 1) for v in box.xyxy[0].tolist()]
@@ -773,7 +898,7 @@ def detect_objects(image_msg, context):
     save_always = context.get("save_always", False)
     if save_dir and (detections or save_always):
         path = _save_detection_image(cv_img, detections, context.get("step", 0),
-                                      save_dir, target_label)
+                                      save_dir, "+".join(target_labels))
         for det in detections:
             det["image_path"] = path
 
@@ -858,8 +983,8 @@ def vlm_guide(image_msg, context):
     import torch
 
     model_id = context.get("qwen_model", DEFAULT_QWEN_MODEL)
-    target_label = context.get("target_label", DEFAULT_OBJECT)
     candidate = context["investigating_candidate"]
+    target_label = candidate["label"]
     bbox = context["detector_bbox"]
 
     model, processor = _get_qwen(model_id)
@@ -934,10 +1059,14 @@ def parse_args(argv):
     p.add_argument("--helix-center", nargs=2, type=float, default=[0.0, 0.0],
                     metavar=("CX", "CY"),
                     help="Helix center (x, y) in base_link")
-    p.add_argument("--object", default=DEFAULT_OBJECT,
-                    help="Object to search for - must be a YOLO/COCO class "
-                         "name for phase 1 detection (e.g. chair, person, "
-                         "bottle); also used to prompt the phase 2 VLM")
+    p.add_argument("--objects", nargs="+", default=[DEFAULT_OBJECT],
+                    help="One or more objects to search for - each must be "
+                         "a YOLO/COCO class name (e.g. --objects chair book "
+                         "bottle). Phase 1 sweeps once, checking every "
+                         "waypoint's frame for ANY of them; phase 2 then "
+                         "investigates each candidate as its own specific "
+                         "class, so a chair candidate is never confused "
+                         "with a book detection in the same frame.")
     p.add_argument("--yolo-weights", default=DEFAULT_YOLO_WEIGHTS,
                     help="Path to YOLO weights file for phase 1 detection")
     p.add_argument("--save-detections-dir", default=DEFAULT_DETECTIONS_DIR,
@@ -988,7 +1117,7 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
-def run_phase1_helix(node, plan, opts):
+def run_phase1_helix(node, plan, opts, feedback_cb=None):
     """Deterministic sweep of the easily-visible region, with a YOLO
     detector (detect_objects) checked at every waypoint - not the VLM,
     which is reserved for phase 2.
@@ -998,6 +1127,10 @@ def run_phase1_helix(node, plan, opts):
 
     Logs only each object location found (INFO); routine per-waypoint
     progress is DEBUG (enable with --ros-args --log-level debug for that).
+
+    feedback_cb, if given, is called as feedback_cb(phase, message, step)
+    once per waypoint - purely for surfacing progress (e.g. as ROS action
+    feedback); a no-op for plain CLI use.
 
     Returns (found, candidates):
       - found: list of detection dicts (confidence >=
@@ -1019,17 +1152,21 @@ def run_phase1_helix(node, plan, opts):
         if not ok:
             failures += 1
             node.get_logger().debug(f"Phase 1 waypoint {i + 1}/{len(plan)} failed, skipping")
+            if feedback_cb:
+                feedback_cb("phase1", f"waypoint {i + 1}/{len(plan)}: move failed", i + 1)
             continue
 
         image = node.capture_image(timeout=5.0)
         if image is None:
             node.get_logger().debug(f"Phase 1 waypoint {i + 1}: no image received")
+            if feedback_cb:
+                feedback_cb("phase1", f"waypoint {i + 1}/{len(plan)}: no image", i + 1)
             time.sleep(opts.dwell)
             continue
 
         detections = detect_objects(image, {
             "step": i, "waypoint_xyz": xyz, "waypoint_quat": quat,
-            "yolo_weights": opts.yolo_weights, "target_label": opts.object,
+            "yolo_weights": opts.yolo_weights, "target_labels": opts.objects,
             "save_detections_dir": os.path.join(opts.save_detections_dir, "phase1")
                                    if opts.save_detections_dir else None,
         })
@@ -1039,6 +1176,10 @@ def run_phase1_helix(node, plan, opts):
                 continue
             loc = tuple(round(v, 3) for v in xyz)
             if conf >= DETECTION_CONFIDENCE_THRESHOLD:
+                obj_xyz = (back_project_object_position(node, det["bbox"])
+                           if det.get("bbox") else None)
+                position = obj_xyz if obj_xyz is not None else xyz
+                loc = tuple(round(v, 3) for v in position)
                 node.get_logger().info(
                     f"Phase 1 FOUND: {det.get('label', '?')} "
                     f"(conf={conf:.2f}) at {loc}"
@@ -1047,7 +1188,7 @@ def run_phase1_helix(node, plan, opts):
                     "found": True, "confidence": conf,
                     "description": det.get("description", ""),
                     "label": det.get("label", "?"),
-                    "position_base_link": xyz,
+                    "position_base_link": position,
                 })
                 continue
 
@@ -1080,6 +1221,10 @@ def run_phase1_helix(node, plan, opts):
                 "step": i,
             })
 
+        if feedback_cb:
+            feedback_cb("phase1", f"waypoint {i + 1}/{len(plan)}: "
+                        f"{len(found)} found, {len(candidates)} candidate(s) so far",
+                        i + 1)
         time.sleep(opts.dwell)
 
     node.get_logger().debug(
@@ -1089,9 +1234,13 @@ def run_phase1_helix(node, plan, opts):
     return found, candidates
 
 
-def run_phase2_vlm(node, opts, candidates=None):
+def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
     """Investigate phase 1 candidates ONLY - no open-ended/free-form
     exploration. YOLO decides FOUND, the VLM only decides how to move.
+
+    feedback_cb, if given, is called as feedback_cb(phase, message, step)
+    at each candidate/try boundary - purely for surfacing progress (e.g.
+    as ROS action feedback); a no-op for plain CLI use.
 
     For each candidate (in order): move to its saved position, then for
     up to opts.max_tries attempts, alternate YOLO re-detection (via
@@ -1135,6 +1284,11 @@ def run_phase2_vlm(node, opts, candidates=None):
             )
             continue
 
+        if feedback_cb:
+            feedback_cb("phase2",
+                        f"investigating candidate {cand_idx + 1}/{len(candidates)}: "
+                        f"{cand.get('label', '?')}", step)
+
         # Tracks the last successfully executed move for this candidate,
         # so a "lost it" try can back off rather than guess a fresh
         # direction - see the no-bbox branch below.
@@ -1154,7 +1308,7 @@ def run_phase2_vlm(node, opts, candidates=None):
 
             detections = detect_objects(image, {
                 "step": f"p2_c{cand_idx}_t{try_idx}",
-                "yolo_weights": opts.yolo_weights, "target_label": opts.object,
+                "yolo_weights": opts.yolo_weights, "target_labels": [cand["label"]],
                 "save_detections_dir": os.path.join(opts.save_detections_dir, "phase2")
                                        if opts.save_detections_dir else None,
                 "save_always": True,
@@ -1169,20 +1323,31 @@ def run_phase2_vlm(node, opts, candidates=None):
                 f"{try_idx + 1}/{opts.max_tries} (step {step}): YOLO best "
                 f"confidence={best_conf:.2f}"
             )
+            if feedback_cb:
+                feedback_cb("phase2",
+                            f"candidate {cand_idx + 1}/{len(candidates)}, try "
+                            f"{try_idx + 1}/{opts.max_tries}: confidence={best_conf:.2f}",
+                            step)
 
             if best_conf >= DETECTION_CONFIDENCE_THRESHOLD:
-                loc_xyz, _ = node.get_camera_pose(timeout=2.0)
-                loc = tuple(round(v, 3) for v in
-                            (loc_xyz or cand["position_base_link"]))
+                obj_xyz = back_project_object_position(node, best["bbox"])
+                if obj_xyz is None:
+                    obj_xyz, _ = node.get_camera_pose(timeout=2.0)
+                position = obj_xyz if obj_xyz is not None else cand["position_base_link"]
+                loc = tuple(round(v, 3) for v in position)
                 node.get_logger().info(
                     f"Phase 2 FOUND: {best.get('label', '?')} "
                     f"(conf={best_conf:.2f}) at {loc}"
                 )
+                if feedback_cb:
+                    feedback_cb("phase2",
+                                f"FOUND {best.get('label', '?')} "
+                                f"(conf={best_conf:.2f}) at {loc}", step)
                 found.append({
                     "found": True, "confidence": best_conf,
                     "description": best.get("description", ""),
                     "label": best.get("label", "?"),
-                    "position_base_link": loc_xyz or cand["position_base_link"],
+                    "position_base_link": position,
                 })
                 confirmed = True
                 break
@@ -1245,7 +1410,6 @@ def run_phase2_vlm(node, opts, candidates=None):
                         "step": step,
                         "investigating_candidate": cand,
                         "qwen_model": opts.qwen_model,
-                        "target_label": opts.object,
                         "detector_bbox": best["bbox"],
                     })
                     action, amount = decision["action"], decision["amount"]
@@ -1298,6 +1462,47 @@ def run_phase2_vlm(node, opts, candidates=None):
     return found
 
 
+def run_full_search(node, opts, feedback_cb=None):
+    """End-to-end two-phase search: home -> phase 1 sweep -> phase 2
+    investigation -> home. Shared by the CLI entry point (main(), below)
+    and the FindObject action server (object_search_action_server.py) so
+    both drive the exact same search behavior. feedback_cb, if given, is
+    threaded through to run_phase1_helix/run_phase2_vlm - see their
+    docstrings; it's a no-op for plain CLI use.
+
+    Returns the list of found detection dicts (each with a
+    "position_base_link"), possibly empty. Does not init/shutdown rclpy
+    or touch the node's lifecycle - callers own that."""
+    helix_plan = generate_helix_plan(
+        opts.helix_radius, opts.helix_height,
+        opts.tilt_up_deg, opts.tilt_down_deg,
+        opts.num_sectors, opts.tilts_per_sector,
+        center_xy=tuple(opts.helix_center),
+    )
+
+    if not opts.skip_start_home:
+        node.get_logger().debug("Moving to home position before starting")
+        if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
+            node.get_logger().warn("Failed to reach home position before starting")
+
+    found = []
+    candidates = []
+    if not opts.skip_phase1:
+        found, candidates = run_phase1_helix(node, helix_plan, opts, feedback_cb=feedback_cb)
+
+    if not opts.skip_phase2:
+        found += run_phase2_vlm(node, opts, candidates, feedback_cb=feedback_cb)
+
+    node.publish_found_markers(found)
+
+    if not opts.skip_return_home:
+        node.get_logger().debug("Returning to home position")
+        if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
+            node.get_logger().warn("Failed to return to home position")
+
+    return found
+
+
 def main(args=None):
     rclpy.init(args=args)
     argv = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
@@ -1338,18 +1543,7 @@ def main(args=None):
         rclpy.shutdown()
         sys.exit(1)
 
-    if not opts.skip_start_home:
-        node.get_logger().debug("Moving to home position before starting")
-        if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
-            node.get_logger().warn("Failed to reach home position before starting")
-
-    found = []
-    candidates = []
-    if not opts.skip_phase1:
-        found, candidates = run_phase1_helix(node, helix_plan, opts)
-
-    if not opts.skip_phase2:
-        found += run_phase2_vlm(node, opts, candidates)
+    found = run_full_search(node, opts)
 
     # Search always completes (no early stop on a find) - report every
     # confirmed object found, not just the first.
@@ -1364,11 +1558,6 @@ def main(args=None):
         node.get_logger().info(
             f"Scan complete, nothing found within {opts.max_object_distance}m"
         )
-
-    if not opts.skip_return_home:
-        node.get_logger().debug("Returning to home position")
-        if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
-            node.get_logger().warn("Failed to return to home position")
 
     node.destroy_node()
     rclpy.shutdown()

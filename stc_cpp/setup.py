@@ -1,3 +1,5 @@
+import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'stc_cpp'
@@ -10,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', glob.glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,13 +23,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-        	'offline = stc_cpp.planner_offline:main',
-                'online = stc_cpp.planner_online:main',
-                'incremental = stc_cpp.incremental_planner_online:main',
-                'tester_path = stc_cpp.tester_path:main',
-                'test = stc_cpp.test:main',
-                'stc = stc_cpp.stc:main',
-                'stc_test = stc_cpp.stc_test:main'
-            ],
-        },
-    )
+            'stc = stc_cpp.stc:main',
+        ],
+    },
+)

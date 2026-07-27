@@ -1,33 +1,30 @@
 # SimExCpp — VLM+YOLO-Guided Object Search for a Husky+UR10 Mobile Manipulator
 
 A ROS 2 workspace that simulates a **Clearpath Husky** carrying a **Universal
-Robots UR10** arm, fitted with a wrist-mounted RGB-D camera, and drives it
-through a **two-phase autonomous object search**:
+Robots UR10** arm, fitted with a wrist-mounted RGB-D camera. It combines two
+pieces:
 
-1. **Phase 1 — deterministic sweep.** The arm sweeps the camera through a
-   fixed pan/tilt pattern around the robot while a YOLOv8 detector scans
-   every frame for a target object class (e.g. `chair`, `book`, `bottle`).
-2. **Phase 2 — VLM-guided investigation.** Every plausible-but-unconfirmed
-   detection from phase 1 is revisited. The arm closes in on it using a
-   combination of **depth-camera 3D back-projection** (precise, when
-   available) and a **vision-language model** (Qwen2.5-VL-7B-Instruct, as a
-   qualitative fallback) until YOLO confirms it above a fixed confidence
-   threshold — or the search gives up on that candidate and moves to the
-   next one.
+1. **Object search** — a two-phase YOLO+VLM-guided arm routine that looks
+   for one or more target objects from wherever the base currently is, and
+   is exposed as both a standalone CLI script and a ROS 2 action.
+2. **STC coverage** — a spanning-tree-coverage planner that drives the base
+   around the whole map, and calls the object search action every time it
+   enters a new coverage cell, so the robot searches as it explores.
 
-The scan **never stops early**: it completes the full sweep and investigates
-every candidate, then reports every object it found (with 3D position in
-`base_link`) at the end.
+Every confirmed find gets an RViz marker dropped at its real (depth
+back-projected) position in the `map` frame.
 
 This README documents the whole workspace and gives a step-by-step path to
-reproducing the search demo from a clean machine.
+reproducing it from a clean machine.
 
 ---
 
 ## Table of contents
 
 - [Repository layout](#repository-layout)
-- [How the search works](#how-the-search-works)
+- [How the object search works](#how-the-object-search-works)
+- [The FindObject action](#the-findobject-action)
+- [STC coverage + object search integration](#stc-coverage--object-search-integration)
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
   - [1. ROS 2 workspace](#1-ros-2-workspace)
@@ -36,9 +33,11 @@ reproducing the search demo from a clean machine.
 - [Building](#building)
 - [Running the simulation](#running-the-simulation)
 - [Running the object search](#running-the-object-search)
+  - [Standalone CLI](#standalone-cli)
   - [CLI reference](#cli-reference)
-  - [Example runs](#example-runs)
+  - [As a ROS 2 action](#as-a-ros-2-action)
   - [Reading the output](#reading-the-output)
+- [Running full coverage + search](#running-full-coverage--search)
 - [Other useful scripts](#other-useful-scripts)
 - [Camera configuration notes](#camera-configuration-notes)
 - [Troubleshooting](#troubleshooting)
@@ -56,25 +55,27 @@ husky_ws/src/
 │   ├── launch/                #   Top-level sim launch files (spawn robot, controllers, MoveIt, etc.)
 │   ├── config/                #   ros2_control / controller yaml, initial joint positions
 │   ├── models/                #   Gazebo models used to populate the worlds
-│   └── scripts/                #   Python: IK testing + the object-search node (see below)
+│   └── scripts/                #   Python: IK testing + object search (CLI + action server)
 ├── husky_ur10_moveit_config/  # MoveIt2 config (SRDF, kinematics, OMPL planning, controllers) for the UR10
 ├── pointcloud_concatenate_ros2/  # Merges multiple point clouds into one (used for laserscan generation)
 ├── pointcloud_to_laserscan/   # Point cloud → 2D LaserScan conversion (feeds Husky navigation)
-├── custom_interfaces/         # Custom message definitions
-└── stc_cpp/                   # Spanning-tree-coverage planner (Python)
+├── custom_interfaces/         # Custom message + action definitions (DetectedObject, FindObject)
+└── stc_cpp/                   # Spanning-tree-coverage planner, calls FindObject per coverage cell
+    └── launch/                #   stc.launch.py (search_objects, subcell_per_cell, ... launch args)
 ```
 
-The object-search work lives almost entirely in **`husky_ur10_cam/scripts/`**:
+The object-search work lives in **`husky_ur10_cam/scripts/`**:
 
 | File | Purpose |
 |---|---|
-| `ee_camera_environment_scan.py` | **Main entry point.** The two-phase search node described above. |
-| `test_ee_pose_ik.py` | Standalone IK/pose-commanding tool used to test and solve fixed end-effector poses (e.g. how `HOME_JOINTS` in the main script was derived). |
+| `ee_camera_environment_scan.py` | The two-phase search logic (`run_full_search`), plus a standalone CLI entry point. |
+| `object_search_action_server.py` | Wraps the same search logic as a `custom_interfaces/action/FindObject` action server. |
+| `test_ee_pose_ik.py` | Standalone IK/pose-commanding tool used to test and solve fixed end-effector poses (e.g. how `HOME_JOINTS` was derived). |
 | `preset_views.py` | Drives the arm through a list of fixed preset joint poses. |
 
 ---
 
-## How the search works
+## How the object search works
 
 ### Phase 1 — fixed pan/tilt sweep
 
@@ -87,7 +88,8 @@ The object-search work lives almost entirely in **`husky_ur10_cam/scripts/`**:
   `--tilt-down-deg`. The camera always faces radially outward and stays
   perfectly level (0 roll/pitch) via a `look_at_quaternion()` helper — this
   matters for image quality fed to both YOLO and the VLM.
-- **YOLOv8** runs on every waypoint's frame, looking for `--object`:
+- **YOLOv8** runs once per waypoint, checking for *any* of `--objects` (one
+  or more target classes) in a single pass:
   - confidence ≥ 80% (fixed threshold, not configurable) → logged as
     **FOUND** immediately, but the sweep *keeps going* through every
     remaining waypoint.
@@ -99,7 +101,9 @@ The object-search work lives almost entirely in **`husky_ur10_cam/scripts/`**:
 
 ### Phase 2 — investigate phase 1 candidates only
 
-For each saved candidate, in order, up to `--max-tries` (default 5) times:
+For each saved candidate, in order, up to `--max-tries` (default 5) times,
+checked against **that candidate's own class only** (so a chair candidate
+is never confused by a book detection sharing the frame):
 
 1. **YOLO re-checks** the current view. Confidence ≥ 80% → candidate
    confirmed, recorded, move on to the next candidate.
@@ -124,16 +128,87 @@ For each saved candidate, in order, up to `--max-tries` (default 5) times:
    - Within a frame with **multiple detections of the same class**, the
      detection nearest (by bbox-center proximity) to the candidate's
      last-known bbox is tracked — not simply the highest-confidence one —
-     so investigation doesn't jump to a different, already-confirmed, or
-     irrelevant nearby object of the same class.
+     so investigation doesn't jump to a different, already-confirmed
+     instance of the same class.
 3. If `--max-tries` is exhausted without confirming, the candidate is given
    up on and the next one is tried. There is no open-ended exploration —
    every phase 2 move only ever gets the camera closer to a *known*
    candidate.
 
-At the end, the script reports **every** confirmed object (label,
-confidence, 3D position in `base_link`) found across both phases, then
-returns the arm home.
+### Reporting a find
+
+The scan **never stops early**: it completes the full sweep and
+investigates every candidate, then reports every confirmed object at the
+end. A found object's position is **not** the camera's pose — it's the
+object's own 3D position, back-projected through the depth cloud at the
+confirming detection's bounding box (falling back to the camera pose only
+if depth is unavailable right at that pixel). Each one also gets an RViz
+marker (see below), then the arm returns home.
+
+---
+
+## The FindObject action
+
+`custom_interfaces/action/FindObject` wraps the same search logic
+(`run_full_search`) as a ROS 2 action, served by
+`object_search_action_server.py`:
+
+```
+# Goal
+string[] target_objects                # one or more YOLO/COCO class names, e.g. ["chair", "book"]
+float32 max_object_distance 0.0        # meters; <= 0.0 means "use server default"
+---
+# Result
+bool success                           # true if at least one object was confirmed
+DetectedObject[] found_objects         # label, confidence, position (base_link), description
+string message
+---
+# Feedback
+string phase                           # "phase1" | "phase2"
+string status
+int32 step
+```
+
+The action server runs the goal's `execute_callback` in its own dedicated
+callback group, separate from the inherited image/points/IK/MoveGroup
+callbacks, so the search's internal blocking waits keep working correctly
+without needing a `MultiThreadedExecutor`. One goal at a time; cancellation
+isn't supported (the search isn't structured to check for it mid-step).
+
+### RViz markers
+
+Every confirmed find (from either the CLI or the action server, since both
+go through `run_full_search`) gets published as a labeled sphere +
+text-label `Marker` on `/found_objects_markers` (`map` frame, transient-local
+QoS so RViz picks them up even if the display is added after the fact). The
+object's `base_link` position is transformed to `map` via TF (the
+`map → odom → base_link` chain AMCL/odometry already broadcast) — this only
+works if localization is actually running; otherwise it logs a warning and
+skips publishing rather than dropping a wrong marker.
+
+Add a `MarkerArray` display in RViz subscribed to `/found_objects_markers`
+with Fixed Frame = `map` to see them.
+
+---
+
+## STC coverage + object search integration
+
+`stc_cpp`'s `kruskal_stc_node` (`stc.py`) drives the base around a
+Kruskal-MST spanning-tree coverage path over the map's free space. It now
+also acts as a `FindObject` action **client**: every time the coverage path
+crosses into a new major cell (different from the last one it searched),
+it pauses forward progress, sends a `FindObject` goal for
+`search_objects`, and only advances to the next waypoint once that search
+finishes (or the action server isn't reachable — see below).
+
+- If the `object_search_action_server.py` isn't running, it logs a warning
+  and continues coverage without pausing, rather than blocking the robot
+  forever.
+- The major-cell grid size is `subcell_per_cell × subcell_size`
+  (`subcell_size` is fixed to the robot's footprint for fine-grained
+  coverage resolution); `subcell_per_cell` (default `2`) is a launch
+  parameter, so you can make the search-trigger grid coarser or finer
+  without touching the robot's actual step size.
 
 ---
 
@@ -142,6 +217,8 @@ returns the arm home.
 - **Ubuntu 22.04** with **ROS 2 Humble**
 - **Gazebo Classic 11** (`gazebo_ros_pkgs`)
 - **MoveIt 2** (Humble binaries)
+- **Nav2** (`amcl` + `map_server`/localization, for the `map` frame TF and
+  for STC coverage's `NavigateToPose` calls)
 - An **NVIDIA GPU** for the VLM. Qwen2.5-VL-7B-Instruct in bf16 is ~16.6 GB
   of weights, which does *not* fit comfortably on a single 16 GB GPU — the
   script loads it with `device_map="auto"` so it will shard across multiple
@@ -154,7 +231,7 @@ returns the arm home.
 ### 1. ROS 2 workspace
 
 ```bash
-# Install ROS 2 Humble desktop + Gazebo Classic + MoveIt2 first (apt), then:
+# Install ROS 2 Humble desktop + Gazebo Classic + MoveIt2 + Nav2 first (apt), then:
 mkdir -p ~/husky_ws/src
 cd ~/husky_ws/src
 git clone https://github.com/farhan-haroon/SimExCpp.git .
@@ -167,10 +244,10 @@ rosdep install --from-paths src --ignore-src -r -y
 You'll also need the upstream Husky and UR description/driver packages that
 this repo's URDFs and MoveIt config build on top of (`ur_description`,
 `ur_msgs`, `moveit_kinematics`, `moveit_planners_ompl`, `moveit_servo`,
-`moveit_simple_controller_manager`, `warehouse_ros_sqlite`, etc. — all
-pulled in by `rosdep` above, provided the corresponding apt sources are
-enabled: `ros-humble-ur`, `ros-humble-moveit`, `ros-humble-clearpath-*` or
-equivalent).
+`moveit_simple_controller_manager`, `warehouse_ros_sqlite`, `nav2_bringup`,
+etc. — all pulled in by `rosdep` above, provided the corresponding apt
+sources are enabled: `ros-humble-ur`, `ros-humble-moveit`,
+`ros-humble-navigation2`, `ros-humble-clearpath-*` or equivalent).
 
 ### 2. Python/ML dependencies
 
@@ -231,7 +308,7 @@ source install/setup.bash
 `--symlink-install` matters here: the Python scripts in
 `husky_ur10_cam/scripts/` are installed as symlinks, so they can be edited
 in place and re-run with `ros2 run` without a rebuild. Only new files or
-`CMakeLists.txt` changes require a `colcon build`.
+`CMakeLists.txt`/`setup.py` changes require a `colcon build`.
 
 ---
 
@@ -263,21 +340,27 @@ before commanding the arm — the search script waits for `/compute_ik` and
 the `/move_action` action server internally, but Gazebo/gzserver itself can
 take a few seconds longer to settle.
 
+If you want `map`-frame markers or STC coverage, also bring up localization
+(e.g. `ros2 launch nav2_bringup localization_launch.py map:=/path/to/map.yaml`)
+and navigation (`ros2 launch nav2_bringup navigation_launch.py use_sim_time:=true`).
+
 ---
 
 ## Running the object search
 
+### Standalone CLI
+
 With the sim up and workspace sourced in another terminal:
 
 ```bash
-ros2 run husky_ur10_cam ee_camera_environment_scan.py --object chair
+ros2 run husky_ur10_cam ee_camera_environment_scan.py --objects chair
 ```
 
 ### CLI reference
 
 | Flag | Default | Description |
 |---|---|---|
-| `--object` | `chair` | Target class name — must be a YOLO/COCO class; also used in the VLM's prompt. |
+| `--objects` | `chair` | One or more target classes (space-separated), e.g. `--objects chair book laptop`. Each must be a YOLO/COCO class. Phase 1 sweeps once checking for all of them; phase 2 investigates each candidate as its own specific class. |
 | `--helix-radius` | `0.6` | Phase 1 sweep orbit radius around `base_link` (m). |
 | `--helix-height` | `1.0` | Phase 1 sweep orbit height (m). |
 | `--helix-center` | `0.0 0.0` | Orbit center `(x, y)` in `base_link`. |
@@ -302,23 +385,39 @@ ros2 run husky_ur10_cam ee_camera_environment_scan.py --object chair
 | `--points-topic` | derived from `--image-topic` | Organized point cloud topic (depth). |
 | `--dry-run` | off | Print the phase 1 waypoints without commanding the robot. |
 
-### Example runs
+Example runs:
 
 ```bash
 # Sanity-check the sweep plan without moving the robot
 ros2 run husky_ur10_cam ee_camera_environment_scan.py --dry-run
 
-# Search for a book, save every frame for review
-ros2 run husky_ur10_cam ee_camera_environment_scan.py --object book \
+# Search for a book and a laptop, save every frame for review
+ros2 run husky_ur10_cam ee_camera_environment_scan.py --objects book laptop \
     --save-detections-dir ~/husky_ws/detections
 
 # Only run phase 2 investigation moves logic in isolation / skip the sweep
-ros2 run husky_ur10_cam ee_camera_environment_scan.py --object bottle --skip-phase1
+ros2 run husky_ur10_cam ee_camera_environment_scan.py --objects bottle --skip-phase1
 
 # Tighter search radius, closer object distance cap
-ros2 run husky_ur10_cam ee_camera_environment_scan.py --object chair \
+ros2 run husky_ur10_cam ee_camera_environment_scan.py --objects chair \
     --helix-radius 0.5 --max-object-distance 2.0
 ```
+
+### As a ROS 2 action
+
+```bash
+ros2 run husky_ur10_cam object_search_action_server.py
+```
+
+Then send a goal, e.g. from another terminal:
+
+```bash
+ros2 action send_goal /find_object custom_interfaces/action/FindObject \
+    "{target_objects: ['chair', 'book'], max_object_distance: 2.5}" --feedback
+```
+
+This is what `stc_cpp`'s coverage node calls automatically — see
+[STC coverage + object search integration](#stc-coverage--object-search-integration).
 
 ### Reading the output
 
@@ -333,6 +432,7 @@ detections and phase 2 reasoning/moves; everything else is DEBUG):
 [INFO] Scan complete. Found 2 object(s):
 [INFO]   - chair (conf=0.91) at (0.82, 1.14, 0.61)
 [INFO]   - book (conf=0.86) at (0.94, -0.25, 0.50)
+[INFO] Published 2 found-object marker(s) in map frame
 ```
 
 If `--save-detections-dir` is set, every target-label detection (phase 1)
@@ -348,6 +448,30 @@ per-run timestamped folder, e.g.:
     ├── p2_c0_t0.jpg   # candidate 0, try 0
     └── ...
 ```
+
+---
+
+## Running full coverage + search
+
+With the sim (+ localization/navigation) up:
+
+```bash
+# Terminal 2: the action server the coverage node will call into
+ros2 run husky_ur10_cam object_search_action_server.py
+
+# Terminal 3: coverage, searching for chair/book/laptop, bigger 4-subcell major cells
+ros2 launch stc_cpp stc.launch.py search_objects:="chair,book,laptop" subcell_per_cell:=4
+```
+
+| Launch arg | Default | Description |
+|---|---|---|
+| `search_objects` | `chair` | Comma-separated target class(es), e.g. `"chair,book,laptop"`. |
+| `search_max_object_distance` | `0.0` | Forwarded as `FindObject` goal's `max_object_distance`; `<= 0.0` leaves it to the action server's own default. |
+| `subcell_per_cell` | `2` | Major-cell size as a multiple of the robot-footprint-sized subcell. Raise it for bigger cells (fewer, coarser search stops). |
+
+The robot covers the map via the spanning-tree path and pauses to run
+`FindObject` each time it crosses into a new major cell (see
+[integration details](#stc-coverage--object-search-integration) above).
 
 ---
 
@@ -426,6 +550,16 @@ to compensate for the reduced frame-to-frame overlap.
   waits for both, but check `ros2 node list` / `ros2 topic list` if it
   hangs indefinitely — most often this means the Gazebo spawn or
   controller spawners further up the launch chain failed.
+- **STC coverage never pauses to search:** check
+  `object_search_action_server.py` is actually running — if the
+  `find_object` action server isn't reachable within 5s, `stc.py` logs a
+  warning and continues coverage without searching, by design (fail-open
+  rather than blocking forever).
+- **No markers in RViz:** `publish_found_markers` needs a live
+  `map -> base_link` TF (i.e. localization actually running); without it,
+  it logs a warning and skips publishing rather than dropping a wrong
+  marker. Also double check the RViz `MarkerArray` display's topic
+  (`/found_objects_markers`) and Fixed Frame (`map`).
 - **RViz interactive-marker log spam:** already suppressed in
   `husky_ur10_moveit_config/launch/ur_moveit.launch.py` via
   `--ros-args --log-level warn` on the RViz node.
@@ -440,9 +574,9 @@ to compensate for the reduced frame-to-frame overlap.
 
 | Package | Role |
 |---|---|
-| `husky_ur10_cam` | Robot description (Husky + UR10 + wrist camera), Gazebo worlds, sim launch files, and the object-search scripts. Start here. |
+| `husky_ur10_cam` | Robot description (Husky + UR10 + wrist camera), Gazebo worlds, sim launch files, and the object-search scripts (CLI + action server). Start here. |
 | `husky_ur10_moveit_config` | MoveIt2 configuration for the UR10 arm (SRDF, kinematics solver, OMPL planning pipeline, controller bridge, RViz MoveIt plugin). |
+| `custom_interfaces` | `FindObject` action and `DetectedObject` message shared between the object search and STC coverage. |
+| `stc_cpp` | Spanning-tree-coverage path planner; drives the base and calls `FindObject` per coverage cell. |
 | `pointcloud_concatenate_ros2` | Merges multiple point cloud sources into one fused cloud (`/fusion`). |
 | `pointcloud_to_laserscan` | Converts the fused point cloud into a 2D `/scan` LaserScan for Husky ground navigation. |
-| `custom_interfaces` | Custom ROS 2 message definitions used elsewhere in the workspace. |
-| `stc_cpp` | Spanning-tree-coverage path planner (Python), independent of the object-search work. |

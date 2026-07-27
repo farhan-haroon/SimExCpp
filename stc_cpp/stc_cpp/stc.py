@@ -5,6 +5,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Point, PoseWithCovarianceStamped
 from nav2_msgs.action import NavigateToPose
+from custom_interfaces.action import FindObject
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from visualization_msgs.msg import Marker, MarkerArray
@@ -59,7 +60,12 @@ class KruskalSTCNode(Node):
         self.map_origin_y = 0.0
         
         self.subcell_size = max(robot_length, robot_width) * 1.2  # slightly larger than robot
-        self.subcell_per_cell = 2
+        # Major cell size = subcell_size * subcell_per_cell. subcell_size
+        # stays tied to the robot footprint (fine coverage granularity);
+        # subcell_per_cell is the configurable multiplier that grows major
+        # cells without touching that fine-grained step size.
+        self.declare_parameter('subcell_per_cell', 2)
+        self.subcell_per_cell = self.get_parameter('subcell_per_cell').value
         self.cell_size = self.subcell_size * self.subcell_per_cell
         
         # These will be calculated from map
@@ -83,7 +89,25 @@ class KruskalSTCNode(Node):
         self.robot_pose_received = False
         self.robot_pose_x = 0.0
         self.robot_pose_y = 0.0
-        
+
+        # -------------------------
+        # Object search (FindObject action) - triggered once per major
+        # cell the coverage path enters, before continuing to the next
+        # waypoint. current_major_cell starts as None so the very first
+        # waypoint reached also triggers a search.
+        # -------------------------
+        # Comma-separated (not a string-array param) so it's trivially
+        # settable from a launch argument, which is always a plain string
+        # at the CLI (e.g. search_objects:="chair,book,laptop").
+        self.declare_parameter('search_objects', 'chair')
+        self.declare_parameter('search_max_object_distance', 0.0)
+        self.search_objects = [
+            s.strip() for s in self.get_parameter('search_objects').value.split(',')
+            if s.strip()
+        ] or ['chair']
+        self.search_max_object_distance = self.get_parameter('search_max_object_distance').value
+        self.current_major_cell = None
+
         # -------------------------
         # Subscribers, Publishers & Nav2 client
         # -------------------------
@@ -127,6 +151,7 @@ class KruskalSTCNode(Node):
         self.marker_pub = self.create_publisher(MarkerArray, 'stc_markers', marker_qos)
         self._cb_group = ReentrantCallbackGroup()
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose', callback_group=self._cb_group)
+        self.find_object_client = ActionClient(self, FindObject, 'find_object', callback_group=self._cb_group)
         
         # -------------------------
         # Wait for map and robot pose before proceeding
@@ -873,6 +898,70 @@ class KruskalSTCNode(Node):
         get_result_future.add_done_callback(lambda f, i=idx: self.result_callback(f, i))
 
     def result_callback(self, future, idx):
+        self.maybe_search_then_advance(idx)
+
+    # -------------------------
+    # Object search integration - run FindObject once per NEW major cell
+    # reached along the coverage path, then resume to the next waypoint.
+    # -------------------------
+    def maybe_search_then_advance(self, idx):
+        row, col = self.path[idx]
+        major_cell = (row // self.subcell_per_cell, col // self.subcell_per_cell)
+        if major_cell == self.current_major_cell:
+            self.send_next_pose(idx + 1)
+            return
+
+        self.current_major_cell = major_cell
+        self.get_logger().info(
+            f"Reached new major cell {major_cell} - searching for "
+            f"{self.search_objects} before continuing coverage"
+        )
+        self.send_find_object_goal(idx)
+
+    def send_find_object_goal(self, idx):
+        if not self.find_object_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().warn(
+                "find_object action server not available - skipping search, "
+                "continuing coverage"
+            )
+            self.send_next_pose(idx + 1)
+            return
+
+        goal_msg = FindObject.Goal()
+        goal_msg.target_objects = self.search_objects
+        goal_msg.max_object_distance = float(self.search_max_object_distance)
+
+        send_goal_future = self.find_object_client.send_goal_async(
+            goal_msg, feedback_callback=self.find_object_feedback_callback)
+        send_goal_future.add_done_callback(
+            lambda f, i=idx: self.find_object_goal_response(f, i))
+
+    def find_object_feedback_callback(self, feedback_msg):
+        fb = feedback_msg.feedback
+        self.get_logger().info(f"[FindObject] {fb.phase}: {fb.status} (step {fb.step})")
+
+    def find_object_goal_response(self, future, idx):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().warn(
+                "find_object goal rejected - continuing coverage without searching"
+            )
+            self.send_next_pose(idx + 1)
+            return
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(
+            lambda f, i=idx: self.find_object_result_callback(f, i))
+
+    def find_object_result_callback(self, future, idx):
+        result = future.result().result
+        if result.found_objects:
+            for obj in result.found_objects:
+                self.get_logger().info(
+                    f"  Found {obj.label} (conf={obj.confidence:.2f}) at "
+                    f"({obj.position.x:.2f}, {obj.position.y:.2f}, {obj.position.z:.2f})"
+                )
+        else:
+            self.get_logger().info(f"  {result.message}")
         self.send_next_pose(idx + 1)
 
     # -------------------------

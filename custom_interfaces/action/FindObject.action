@@ -1,0 +1,18 @@
+# Run the two-phase (YOLO sweep + VLM-guided investigation) object search
+# with the UR10-mounted end-effector camera, from wherever the base
+# currently is. Intended to be called once the mobile base has come to a
+# stop (e.g. after arriving at a new STC major cell).
+
+# Goal
+string[] target_objects                # one or more YOLO/COCO class names, e.g. ["chair", "book"]
+float32 max_object_distance 0.0        # meters; <= 0.0 means "use server default"
+---
+# Result
+bool success                           # true if at least one object was confirmed
+DetectedObject[] found_objects
+string message
+---
+# Feedback
+string phase                           # "phase1" | "phase2"
+string status
+int32 step
