@@ -1,65 +1,31 @@
 #!/usr/bin/env python3
 """Two-phase environment scan with the UR10-mounted end-effector camera.
 
-Phase 1 - fixed pan/tilt sweep (deterministic, no VLM):
-    The 360 deg surround is divided into `--num-sectors` azimuths (default
-    16, i.e. every 22.5 deg / 8 to each side, tuned for ~60% frame overlap
-    against the ee camera's current ~57 deg horizontal FOV). At each
-    azimuth, position is
-    fixed (same orbit point) and the camera is tilted through
-    `--tilts-per-sector` evenly-spaced pitch angles between `--tilt-up-deg`
-    and `--tilt-down-deg` (default 2 -> up then down) - a small fixed set
-    of waypoints (16 by default) with heavy frame-to-frame overlap given
-    the ee camera's wide FOV. Camera always faces radially outward, only
-    pitching up/down (via look_at_quaternion).
+Phase 1 - fixed pan/tilt sweep, YOLO only:
+    The surroundings are divided into --num-sectors azimuths (default 16,
+    spaced for ~60% frame overlap given the ee camera's ~57 deg horizontal
+    FOV). At each azimuth the camera holds position and steps through
+    --tilts-per-sector pitch angles between --tilt-up-deg and
+    --tilt-down-deg. The arm returns to a fixed HOME_JOINTS pose before
+    and after (--skip-start-home / --skip-return-home). YOLO
+    (detect_objects) runs at every waypoint: detections >=
+    DETECTION_CONFIDENCE_THRESHOLD are recorded as found; weaker ones are
+    saved as candidates for phase 2. The sweep always runs to completion,
+    so multiple objects can be found in one pass. Target-label detections
+    are saved to --save-detections-dir with boxes drawn.
 
-The arm moves to a fixed joint-space HOME_JOINTS (camera perfectly level -
-0 roll, 0 pitch - same exact configuration every time, not re-solved via
-IK) before scanning starts and again after it ends, unless disabled with
---skip-start-home / --skip-return-home.
+Phase 2 - revisit phase 1 candidates only, YOLO confirms:
+    For each candidate, up to --max-tries attempts: YOLO re-checks the
+    current view; a hit confirms the candidate and moves on to the next
+    one. Otherwise the bbox center is back-projected through the depth
+    cloud (/ee_camera/points) to the object's 3D position and the camera
+    moves to --approach-standoff from it (compute_3d_approach_pose). If
+    depth is invalid there or the move fails, vlm_guide() (Qwen2.5-VL)
+    picks one qualitative pan/tilt/forward move instead. No open-ended
+    search - every move only refines a candidate phase 1 already flagged.
 
-    A YOLO detector (detect_objects()) also runs at every phase 1
-    waypoint, looking for any of --objects (default ["chair"], one class
-    or several). If it reports
-    confidence >= DETECTION_CONFIDENCE_THRESHOLD (fixed at 80%, not
-    CLI-configurable), that's logged and recorded as FOUND - but the
-    sweep keeps going through every remaining waypoint rather than
-    stopping, so multiple objects can be found in one run. If it reports
-    a candidate below threshold (plausible but not confident), that
-    waypoint's position is saved (not just logged) and handed to phase 2.
-    Every target-label detection also gets its bounding box drawn and
-    saved to --save-detections-dir for later review.
-
-Phase 2 - investigate phase 1 candidates ONLY (YOLO confirms, VLM moves):
-    Once phase 1 completes, control hands off to run_phase2_vlm(), which
-    revisits every candidate direction phase 1 flagged (any detection
-    below DETECTION_CONFIDENCE_THRESHOLD, whatever its confidence), in
-    order. For each candidate, up to --max-tries (default 5) times: YOLO
-    (detect_objects) re-checks the current view - if it now reports
-    confidence >= DETECTION_CONFIDENCE_THRESHOLD, that candidate is
-    confirmed (logged and recorded) and investigation moves on to the
-    next candidate, rather than stopping the whole scan. Otherwise, to
-    get a better look before trying YOLO again: first a precise 3D move
-    is attempted - the
-    bbox center is back-projected through the depth camera's point cloud
-    (/ee_camera/points) to the object's real 3D position, transformed to
-    base_link via the camera's live TF pose, and the camera moves
-    directly to a fixed --approach-standoff distance from it along the
-    line of sight (see compute_3d_approach_pose). If depth is invalid
-    there (common at edges/thin objects) or the move fails, this falls
-    back to vlm_guide() (Qwen2.5-VL-7B-Instruct), which picks ONE
-    qualitative move (pan/tilt/forward) instead. If --max-tries is
-    exhausted without confirming, that candidate is given up on and the
-    next one in the list is tried. There is no open-ended/free-form
-    exploration beyond the candidates phase 1 already flagged - every
-    move only ever gets the camera closer to a known candidate, never
-    decides WHETHER the object is present (YOLO's job) or WHERE else to
-    look.
-
-Models: YOLOv8 (--yolo-weights, default ~/husky_ws/yolov8n.pt) for both
-the phase 1 sweep and phase 2 confirmation, Qwen2.5-VL-7B-Instruct
-(--qwen-model) for phase 2 move guidance. Both are loaded lazily (once,
-on first use) and cached for the life of the process.
+Models: YOLOv8 (--yolo-weights) and Qwen2.5-VL-7B-Instruct (--qwen-model),
+loaded lazily and cached for the process lifetime.
 
 Usage:
     ros2 run husky_ur10_cam ee_camera_environment_scan.py
@@ -106,38 +72,25 @@ DEFAULT_OBJECT = "chair"
 DEFAULT_DETECTIONS_DIR = os.path.expanduser("~/husky_ws/detections")
 
 VLM_ROTATION_ACTIONS = ("pan_left", "pan_right", "tilt_up", "tilt_down")
-# Phase 2's job is centering + closing distance on a known candidate, not
-# general navigation - deliberately NOT offering left/right/up/down
-# translation here. Translating the camera sideways shifts objects in the
-# image via parallax, often in the direction a small VLM doesn't expect,
-# which is why it was observed drifting sideways instead of converging.
-# Panning/tilting is the geometrically intuitive tool for centering
-# (pan toward the side the object's on), "forward" for closing distance.
+# No lateral translation here - sideways moves shift the image via
+# parallax in a direction a small VLM doesn't reliably predict. Pan/tilt
+# is the intuitive tool for centering; "forward" closes distance.
 VLM_APPROACH_ACTIONS = ("pan_left", "pan_right", "tilt_up", "tilt_down", "forward")
-# The VLM proposes its own "amount" unconstrained - clamp it so a single
-# step can't be a huge, failure-prone jump.
+# Clamp the VLM's proposed step size so a single move can't be a huge,
+# failure-prone jump.
 MAX_TRANSLATION_STEP = 0.5   # meters
 MAX_ROTATION_STEP = 0.17     # radians (~20 deg)
 ALLOWED_PLANNING_TIME = 10.0
 
-# Detections at/above this confidence during phase 1 are treated as an
-# immediate FOUND (scan stops there and then). Below it but > 0, the
-# detection is plausible but not trustworthy enough alone - its position
-# gets saved as a candidate for phase 2 to actively go re-investigate.
-# Fixed (not CLI-configurable) at 80%.
-DETECTION_CONFIDENCE_THRESHOLD = 0.8
+# Below this, a phase 1 detection is saved as a candidate for phase 2
+# rather than counted as an immediate find. Fixed, not CLI-configurable.
+DETECTION_CONFIDENCE_THRESHOLD = 0.7
 
-# Home is a FIXED joint-space target, not solved via IK at call time.
-# IK for a given pose isn't unique - KDL seeds off whatever the arm's
-# current state happens to be, so re-solving HOME_XYZ/HOME_FORWARD on each
-# call could land on a different elbow-up/down branch each time even
-# though the end-effector pose comes out the same. Hardcoding the joint
-# values guarantees the arm returns to the exact same configuration every
-# time, not just the same camera pose.
-#
-# These values were solved once (via test_ee_pose_ik.py) for
-# camera_optical_link at xyz=(0.5, 0.0, 1.0) in base_link, facing +X, with
-# look_at_quaternion - i.e. perfectly level (0 roll, 0 pitch).
+# Fixed joint-space target rather than an IK solve at call time, so the
+# arm returns to the exact same configuration every time (IK's
+# elbow-up/down branch depends on the arm's current state, not just the
+# target pose). Solved once via test_ee_pose_ik.py for camera_optical_link
+# at xyz=(0.5, 0.0, 1.0) in base_link, facing +X, level (0 roll, 0 pitch).
 HOME_JOINTS = {
     "ur10_shoulder_pan_joint": 5.8584,
     "ur10_shoulder_lift_joint": -1.9169,
@@ -147,11 +100,8 @@ HOME_JOINTS = {
     "ur10_wrist_3_joint": 0.0,
 }
 
-# Fallback if go_home() can't plan to HOME_XYZ at all (e.g. the arm is
-# wedged in an awkward leftover configuration after a failed run). This is
-# the UR10's classic tucked-in pose - much less extended than HOME_XYZ, so
-# it's reachable from almost any starting state. Not level/forward-facing
-# like true home, just a safe known-good joint target to escape to.
+# Fallback when go_home() can't reach HOME_JOINTS directly - the UR10's
+# tucked-in pose, reachable from almost any starting configuration.
 RECOVERY_JOINTS = {
     "ur10_shoulder_pan_joint": 0.0,
     "ur10_shoulder_lift_joint": -1.57,
@@ -219,9 +169,7 @@ def quat_from_rpy(roll, pitch, yaw):
 
 def look_at_quaternion(forward, up=(0.0, 0.0, 1.0)):
     """Orientation for a REP-103 optical frame (X=right, Y=down, Z=forward)
-    that gazes along `forward` with zero roll relative to `up` - image
-    horizon stays level, never tilted/upside-down. Same construction as
-    test_ee_pose_ik.py (duplicated here for self-containment)."""
+    that gazes along `forward` with zero roll relative to `up`."""
     f = _normalize(forward)
     u = _normalize(up)
     if abs(_dot(f, u)) > 0.999:
@@ -238,10 +186,8 @@ def look_at_quaternion(forward, up=(0.0, 0.0, 1.0)):
 
 def get_point_from_cloud(points_msg, u, v):
     """Return (x, y, z) in the cloud's own frame at pixel (u, v) of an
-    organized PointCloud2 (same width/height grid as the paired image, so
-    a YOLO bbox's pixel coords index directly into it), or None if out of
-    bounds or the depth there is invalid (NaN/inf - common at object
-    edges, thin/reflective surfaces, or max sensor range)."""
+    organized PointCloud2 (same width/height grid as the paired image),
+    or None if out of bounds or the depth there is invalid (NaN/inf)."""
     if points_msg is None:
         return None
     if not (0 <= v < points_msg.height and 0 <= u < points_msg.width):
@@ -281,14 +227,10 @@ def transform_point_to_base_link(point_camera_frame, camera_xyz, camera_quat):
 
 def select_tracked_detection(detections, last_bbox):
     """Pick the detection to keep pursuing this try. With multiple
-    instances of the target class in frame (e.g. two chairs), the
-    highest-confidence one isn't necessarily the one being investigated -
-    it could be a different, closer/clearer instance, including one
-    already confirmed earlier. Instead, track by proximity: pick whichever
-    detection's bbox center is closest to `last_bbox`'s (the candidate's
-    own last-known bbox), so investigation stays locked onto the same
-    object across tries. Falls back to highest confidence only when
-    there's no prior bbox to track from (first try) or no detections."""
+    instances of the target class in frame, track by proximity to
+    `last_bbox` so investigation stays locked onto the same object across
+    tries, rather than jumping to whichever is highest-confidence.
+    Falls back to highest confidence on the first try (no prior bbox)."""
     if not detections:
         return None
     if last_bbox is None:
@@ -320,19 +262,15 @@ def measure_bbox_distance(points_msg, bbox):
 
 
 def back_project_object_position(node, bbox, points_msg=None):
-    """Best-effort actual 3D position (base_link) of whatever's at bbox's
-    center pixel, via depth back-projection through the point cloud - the
-    same math compute_3d_approach_pose uses to plan a move. This is the
-    OBJECT's position, not the camera's - callers recording a "found"
-    location should use this instead of the camera/waypoint pose, which
-    can be arbitrarily far from the object along the line of sight (e.g.
-    a phase 1 sweep waypoint is on a fixed ~0.6m orbit around the robot;
-    the object it's looking at could be meters further out).
+    """Best-effort 3D position (base_link) of whatever's at bbox's center
+    pixel, via depth back-projection through the point cloud. This is the
+    OBJECT's position, not the camera/waypoint's - a phase 1 sweep
+    waypoint sits on a fixed orbit around the robot and can be well short
+    of the object along the line of sight.
 
-    Pass an already-captured points_msg to avoid a redundant capture
-    (e.g. phase 1's per-waypoint frame); otherwise one is captured here.
-    Returns None if depth or the camera's TF pose isn't available at that
-    moment - caller should fall back to something coarser."""
+    Pass an already-captured points_msg to avoid a redundant capture;
+    otherwise one is captured here. Returns None if depth or the camera's
+    TF pose isn't available."""
     if points_msg is None:
         points_msg = node.capture_points(timeout=2.0)
     cx = int((bbox[0] + bbox[2]) / 2)
@@ -348,19 +286,15 @@ def back_project_object_position(node, bbox, points_msg=None):
 
 def compute_3d_approach_pose(object_xyz, camera_xyz, standoff, max_step=None):
     """New camera (xyz, quat), both in base_link, that moves toward
-    `object_xyz` along the current camera->object line, aiming to end up
-    `standoff` meters short of it - precise, from real depth data,
-    instead of the qualitative pan/tilt/forward guessing used when depth
-    isn't available.
+    `object_xyz` along the current camera->object line, ending up
+    `standoff` meters short of it.
 
-    If `max_step` is given and the full distance to standoff exceeds it,
-    only moves max_step closer this call rather than jumping the whole
-    way in one shot - a single depth reading at one pixel can be noisy,
-    and if the object is currently far away the full-distance target can
-    land outside the arm's reach entirely (observed: computing a target
-    ~1.5m away, well past the UR10's ~1.3m reach, which then just failed
-    outright). Bounded steps converge over several tries instead. If
-    already closer than standoff, travel is negative (backs off)."""
+    If `max_step` is given and the distance to standoff exceeds it, only
+    moves max_step closer this call instead of jumping the whole way -
+    a single depth reading can be noisy, and a full-distance target can
+    land outside the arm's reach. Bounded steps converge over several
+    tries instead. If already closer than standoff, travel is negative
+    (backs off)."""
     direction = tuple(o - c for o, c in zip(object_xyz, camera_xyz))
     dist = math.sqrt(sum(d * d for d in direction))
     if dist < 1e-6:
@@ -428,6 +362,10 @@ class EnvironmentScanner(Node):
         )
         self.found_marker_pub = self.create_publisher(
             MarkerArray, "found_objects_markers", marker_qos)
+        # RViz keys markers by (namespace, id); a never-reused counter
+        # across calls to publish_found_markers keeps each search run's
+        # markers from overwriting the previous run's.
+        self._next_marker_id = 0
 
     def _image_cb(self, msg):
         self._latest_image = msg
@@ -449,11 +387,8 @@ class EnvironmentScanner(Node):
         return self._latest_points
 
     def get_camera_pose(self, timeout=2.0):
-        """Current (xyz, quat) of CAMERA_FRAME in base_link, via TF - the
-        ground-truth actual pose, regardless of whether the last move was
-        an absolute move_to_pose or a camera-relative move() (which
-        doesn't directly tell the caller where it ended up). Returns
-        (None, None) if the transform isn't available in time."""
+        """Current (xyz, quat) of CAMERA_FRAME in base_link, via TF.
+        Returns (None, None) if the transform isn't available in time."""
         from rclpy.time import Time
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -472,13 +407,10 @@ class EnvironmentScanner(Node):
     def publish_found_markers(self, found, timeout=2.0):
         """Publish an RViz MarkerArray (a labeled sphere per object) in
         MAP_FRAME for every confirmed find. Each found dict's
-        "position_base_link" is transformed map <- base_link via TF (the
-        map -> odom -> base_link chain AMCL/odometry already broadcast) -
-        cheap and exact, since the base doesn't move during a search; no
-        tf2_geometry_msgs needed, just _rotate_vector_by_quat like the
-        rest of this file's transforms. Silently does nothing if there's
-        nothing found or the map transform isn't available (e.g. no
-        localization running - standalone/dry testing)."""
+        "position_base_link" is transformed via the map -> base_link TF
+        (the base doesn't move during a search, so this is exact). Does
+        nothing if there's nothing found or the map transform isn't
+        available (e.g. no localization running)."""
         if not found:
             return
         from rclpy.time import Time
@@ -503,7 +435,9 @@ class EnvironmentScanner(Node):
 
         stamp = self.get_clock().now().to_msg()
         markers = MarkerArray()
-        for i, f in enumerate(found):
+        for f in found:
+            marker_id = self._next_marker_id
+            self._next_marker_id += 1
             p_map = tuple(m + r for m, r in
                            zip(map_xyz, _rotate_vector_by_quat(f["position_base_link"], map_quat)))
 
@@ -511,7 +445,7 @@ class EnvironmentScanner(Node):
             sphere.header.frame_id = MAP_FRAME
             sphere.header.stamp = stamp
             sphere.ns = "found_objects"
-            sphere.id = i
+            sphere.id = marker_id
             sphere.type = Marker.SPHERE
             sphere.action = Marker.ADD
             sphere.pose.position.x, sphere.pose.position.y, sphere.pose.position.z = p_map
@@ -524,7 +458,7 @@ class EnvironmentScanner(Node):
             label.header.frame_id = MAP_FRAME
             label.header.stamp = stamp
             label.ns = "found_objects_labels"
-            label.id = i
+            label.id = marker_id
             label.type = Marker.TEXT_VIEW_FACING
             label.action = Marker.ADD
             label.pose.position.x, label.pose.position.y = p_map[0], p_map[1]
@@ -642,17 +576,12 @@ class EnvironmentScanner(Node):
         """Absolute move to a fixed waypoint.
 
         With the default attempts=1, a single planning failure just fails
-        (fine for e.g. the phase 1 sweep, where skipping one waypoint out
-        of many is cheap). Pass attempts>1 for a stronger guarantee (used
-        when phase 2 revisits a saved candidate pose - losing it entirely
-        because of one unlucky plan is a bigger loss than a skipped
-        sweep waypoint): retries planning up to `attempts` times first
-        (OMPL's sampling-based planner isn't deterministic, so a retry
-        from the same start/goal can succeed even when a prior attempt
-        didn't - see go_home for the same pattern), and if still failing,
-        falls back through RECOVERY_JOINTS - reachable from almost any
-        starting state - then makes one final attempt at the real target
-        from there."""
+        (cheap to skip a phase 1 waypoint). Pass attempts>1 for a
+        stronger guarantee (phase 2 revisiting a saved candidate): retries
+        planning up to `attempts` times (OMPL's planner isn't
+        deterministic, so a retry can succeed where the last one didn't),
+        then falls back through RECOVERY_JOINTS and makes one final
+        attempt at the real target from there."""
         joints = self.solve_ik(xyz, quat, group, frame_id=frame_id)
         if joints is None:
             return False
@@ -673,25 +602,16 @@ class EnvironmentScanner(Node):
         return False
 
     def go_home(self, group, vel_scale, accel_scale, attempts=3):
-        """Move to the fixed HOME_JOINTS target - no IK, so it's the exact
-        same joint configuration every time (see HOME_JOINTS comment for
-        why that matters), not just the same end-effector pose.
+        """Move to the fixed HOME_JOINTS target (see HOME_JOINTS comment).
 
-        Retries planning up to `attempts` times: reaching a fixed joint
-        target still needs a collision-free PATH from wherever the arm
-        currently is, which can fail from an awkward starting
-        configuration (e.g. left over from a previous run that didn't
-        fully recover). OMPL's sampling-based planner isn't deterministic,
-        so a retry can succeed even when a prior attempt from the same
-        start/goal didn't.
+        Retries planning up to `attempts` times - reaching a fixed joint
+        target still needs a collision-free path from wherever the arm
+        currently is, and OMPL's planner isn't deterministic, so a retry
+        can succeed where the last one didn't.
 
-        If all `attempts` still fail (the arm is genuinely wedged, not
-        just unlucky sampling), falls back to RECOVERY_JOINTS - a much
-        less extended pose that's reachable from almost any starting
-        state - then makes one more try at the real HOME_JOINTS from
-        there. Returns True either way the arm ends up in a known-good
-        state, but logs which one so the caller/log makes it clear if the
-        arm isn't actually at the exact home configuration."""
+        If all attempts fail, falls back to RECOVERY_JOINTS then makes
+        one more try at HOME_JOINTS from there. Returns True either way
+        the arm ends up in a known-good state, logging which one."""
         for attempt in range(1, attempts + 1):
             if self.execute_joints(HOME_JOINTS, group, vel_scale, accel_scale):
                 return True
@@ -720,17 +640,11 @@ def generate_helix_plan(radius, height, tilt_up_deg, tilt_down_deg,
                          num_sectors, tilts_per_sector, center_xy=(0.0, 0.0)):
     """Sparse pan/tilt sweep around the robot's own vertical axis.
 
-    The 360 deg surround is divided into `num_sectors` evenly-spaced
-    azimuths (e.g. 8 -> every 45 deg, 4 to each side). Position orbits at
-    fixed `radius`/`height` and does NOT change within a sector - only the
-    camera's pitch does: at each azimuth, `tilts_per_sector` waypoints are
-    taken at evenly-spaced elevation angles between +tilt_up_deg (up) and
-    -tilt_down_deg (down), e.g. 2 -> straight up-tilt then down-tilt.
-    Default 16 sectors x 2 tilts = 32 waypoints.
-
-    Coverage math: with the ee camera's current ~57 deg horizontal FOV,
-    azimuths spaced 360/num_sectors apart (22.5 deg by default) still
-    overlap by ~60% frame-to-frame, so this stays sufficient coverage.
+    `num_sectors` evenly-spaced azimuths around a fixed `radius`/`height`
+    orbit; at each azimuth, `tilts_per_sector` waypoints span elevation
+    angles between +tilt_up_deg and -tilt_down_deg. Default 16 sectors x
+    2 tilts = 32 waypoints, spaced (22.5 deg) for ~60% frame overlap given
+    the ee camera's ~57 deg horizontal FOV.
 
     Returns a list of (xyz, quat) absolute waypoints in base_link."""
     cx, cy = center_xy
@@ -807,11 +721,9 @@ def _get_qwen(model_id):
 
 def _save_detection_image(cv_img, detections, step, save_dir, label_hint=DEFAULT_OBJECT):
     """Draw a box + label/confidence for every detection onto a copy of
-    the frame and save it to `save_dir` for later review. Works fine with
-    an empty `detections` list too (just saves the plain frame) - the
-    caller decides whether to call this unconditionally (phase 2, so
-    every try's frame is kept, not just the ones YOLO caught something
-    in) or only on a hit (phase 1). Returns the saved path."""
+    the frame and save it to `save_dir` for later review. Works with an
+    empty `detections` list too (just saves the plain frame). Returns
+    the saved path."""
     import cv2
     os.makedirs(save_dir, exist_ok=True)
 
@@ -838,33 +750,16 @@ def _save_detection_image(cv_img, detections, step, save_dir, label_hint=DEFAULT
 
 def detect_objects(image_msg, context):
     """YOLOv8 detector for context["target_labels"] (a list of YOLO/COCO
-    class names; a single-element list for a single target - a bare
-    context["target_label"] string is also accepted for backward compat
-    and normalized to a one-element list). Detects ANY of them in one
-    pass, so a multi-object search doesn't need to repeat the sweep per
-    object - phase 1 passes the full list; phase 2 passes just the one
-    class it's currently investigating (a specific candidate is always
-    one object), so it isn't distracted by a different target class
-    sharing the frame. Run once per phase 1 waypoint - needs to be fast
-    since it runs at every stop of the fixed sweep, not just in phase 2.
-    Confidence thresholding (FOUND vs. save-as-candidate) is decided by
-    the caller (run_phase1_helix), not here - this just reports what it
-    sees.
+    class names; a bare context["target_label"] string is also accepted
+    and normalized to a one-element list). Detects any of them in one
+    pass - phase 1 passes the full search list, phase 2 passes just the
+    one class it's currently investigating. Confidence thresholding
+    (found vs. save-as-candidate) is decided by the caller, not here.
 
-    `context["waypoint_xyz"]`/`context["waypoint_quat"]` (the camera's
-    pose in base_link for this waypoint) are provided but not currently
-    used for localization - the caller uses the waypoint position itself
-    as the saved candidate location. A sharper implementation could
-    back-project the detected bbox through the depth image instead (this
-    is a depth camera - see /ee_camera/depth/image_raw, /ee_camera/points)
-    for a true 3D object position.
-
-    If context["save_detections_dir"] is set, saves ONE image for the
-    frame (any target-label boxes drawn, or the plain frame if none) and
-    records its path on every detection dict - either when at least one
-    target-label detection is found, or unconditionally if
-    context["save_always"] is set (used by phase 2 so every try's frame
-    is kept, not just the ones that hit).
+    If context["save_detections_dir"] is set, saves one image for the
+    frame (target-label boxes drawn, or the plain frame if none) and
+    records its path on every detection dict - on a hit, or always if
+    context["save_always"] is set (phase 2 keeps every try's frame).
 
     Returns a list of zero or more:
         {"confidence": float, "label": str, "description": str,
@@ -944,38 +839,24 @@ def _classify_to_move(text):
 def vlm_guide(image_msg, context):
     """Qwen2.5-VL-7B-Instruct move-guidance call for phase 2.
 
-    The VLM does NOT decide whether the object is present - YOLO
-    (detect_objects) does that. This is only ever asked, for a position
-    phase 1 already flagged with a detection
-    (context["investigating_candidate"], required): "you can't confirm it
-    yet, pick ONE move to get a better/closer look so the detector can
-    re-check." Called up to --max-tries times per candidate, between YOLO
-    re-checks - but ONLY when context["detector_bbox"] is available (the
-    caller, run_phase2_vlm, handles the no-detection case itself with
-    deterministic backoff instead of calling this - see its comments for
-    why: asked to reason about "not currently visible" with nothing to
-    ground on, this always guessed the same fixed direction, compounding
-    into a monotonic drift away from the object over several tries).
+    The VLM never decides whether the object is present - YOLO does
+    that. This only ever picks ONE move to get a better look at a
+    candidate phase 1 already flagged (context["investigating_candidate"],
+    required), called up to --max-tries times between YOLO re-checks, and
+    only when context["detector_bbox"] is available (the caller handles
+    the no-detection case itself with deterministic backoff, since the
+    VLM has nothing to ground on there).
 
-    Deliberately restricted to VLM_APPROACH_ACTIONS (pan/tilt + forward,
-    no lateral translation) - translation shifts the image via parallax,
-    which is unintuitive even for people, unlike pan/tilt which directly
-    re-aims toward whichever side of frame the object is on.
+    Restricted to VLM_APPROACH_ACTIONS (pan/tilt + forward, no lateral
+    translation - translation shifts the image via parallax, which reads
+    as unintuitive drift rather than a direct fix).
 
-    Asks for a SINGLE-WORD position classification (LEFT/RIGHT/ABOVE/
-    BELOW/CENTERED), grounded with context["detector_bbox"] (the YOLO
-    bbox from the detection that triggered this call, if any) as explicit
-    numeric frame-position text - action and step amount are then decided
-    by fixed code (_CLASSIFICATION_TO_MOVE), not generated by the model.
-    Two earlier versions were tried and both failed empirically: asking
-    the VLM to judge position purely by looking, it confidently misjudged
-    left vs right (an object plainly on the left called "on the right",
-    panning it further out of view); asking it to output a full JSON move
-    (action+amount+reasoning) even with the same numeric grounding, it
-    collapsed to always answering "forward" regardless of the numbers.
-    A single-word classification is a far narrower task and was verified
-    to track the actual bbox position correctly - see conversation history
-    for the specific test cases.
+    Asks for a single-word position classification (LEFT/RIGHT/ABOVE/
+    BELOW/CENTERED) grounded with context["detector_bbox"] as explicit
+    numeric frame-position text; the move and step amount are then
+    decided by fixed code (_CLASSIFICATION_TO_MOVE), not generated by the
+    model - free-form judgment and full JSON move output were both tried
+    and were unreliable at tracking the bbox correctly.
 
     Returns:
         {"action": str, "amount": float, "description": str}
@@ -1118,19 +999,16 @@ def parse_args(argv):
 
 
 def run_phase1_helix(node, plan, opts, feedback_cb=None):
-    """Deterministic sweep of the easily-visible region, with a YOLO
-    detector (detect_objects) checked at every waypoint - not the VLM,
-    which is reserved for phase 2.
+    """Deterministic sweep of the easily-visible region, with YOLO
+    (detect_objects) checked at every waypoint.
 
-    Does NOT stop early on a high-confidence detection - the sweep always
-    covers every waypoint, so multiple objects can be found in one run.
+    Does not stop early on a high-confidence detection - always covers
+    every waypoint, so multiple objects can be found in one run.
 
-    Logs only each object location found (INFO); routine per-waypoint
-    progress is DEBUG (enable with --ros-args --log-level debug for that).
+    Logs each found location at INFO; per-waypoint progress is DEBUG.
 
     feedback_cb, if given, is called as feedback_cb(phase, message, step)
-    once per waypoint - purely for surfacing progress (e.g. as ROS action
-    feedback); a no-op for plain CLI use.
+    once per waypoint (ROS action feedback); a no-op for plain CLI use.
 
     Returns (found, candidates):
       - found: list of detection dicts (confidence >=
@@ -1235,28 +1113,22 @@ def run_phase1_helix(node, plan, opts, feedback_cb=None):
 
 
 def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
-    """Investigate phase 1 candidates ONLY - no open-ended/free-form
-    exploration. YOLO decides FOUND, the VLM only decides how to move.
+    """Investigate phase 1 candidates only - no open-ended exploration.
+    YOLO decides found, the VLM only decides how to move.
 
     feedback_cb, if given, is called as feedback_cb(phase, message, step)
-    at each candidate/try boundary - purely for surfacing progress (e.g.
-    as ROS action feedback); a no-op for plain CLI use.
+    at each candidate/try boundary; a no-op for plain CLI use.
 
     For each candidate (in order): move to its saved position, then for
-    up to opts.max_tries attempts, alternate YOLO re-detection (via
-    detect_objects) and a move to get a closer/better-centered look (a
-    precise depth-based 3D move when possible, else vlm_guide()'s
-    qualitative pan/tilt/forward, else deterministic backoff - see the
-    branches below). If YOLO ever reports confidence >=
-    DETECTION_CONFIDENCE_THRESHOLD, that candidate is confirmed - logged
-    and recorded, but investigation CONTINUES to the next candidate
-    rather than stopping the whole scan, so multiple objects can be
-    confirmed in one run. If opts.max_tries is exhausted without
-    confirming, gives up on this candidate and moves to the next one.
-    Also respects an overall opts.phase2_max_steps cap across every
-    candidate combined.
+    up to opts.max_tries attempts, alternate YOLO re-detection and a move
+    to get a closer/better-centered look (a precise depth-based 3D move
+    when possible, else vlm_guide()'s qualitative pan/tilt/forward, else
+    deterministic backoff - see the branches below). A confirmed
+    candidate doesn't stop the scan - investigation continues to the
+    next one, so multiple objects can be confirmed in one run. Also
+    respects an overall opts.phase2_max_steps cap across all candidates.
 
-    Logs only each move's reasoning, one line per try (INFO) - routine
+    Logs each move's reasoning, one line per try (INFO); routine
     step/progress bookkeeping is DEBUG.
 
     Returns a list of found detection dicts (each with a
@@ -1289,9 +1161,8 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
                         f"investigating candidate {cand_idx + 1}/{len(candidates)}: "
                         f"{cand.get('label', '?')}", step)
 
-        # Tracks the last successfully executed move for this candidate,
-        # so a "lost it" try can back off rather than guess a fresh
-        # direction - see the no-bbox branch below.
+        # Last successfully executed move, so a "lost it" try can back
+        # off rather than guess a fresh direction (see no-bbox branch).
         last_action, last_amount = None, None
         last_bbox = cand.get("bbox")
         confirmed = False
@@ -1354,17 +1225,12 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
 
             if try_idx < opts.max_tries - 1:
                 # Not the last try - get a better look before the next
-                # YOLO re-check. (On the last try there's no point moving
-                # again, so this - and the loop - just end.)
+                # YOLO re-check.
                 depth_move_done = False
                 if best is not None:
-                    # We have a bbox - try a precise 3D move first: back-
-                    # project the bbox center through the depth camera's
-                    # point cloud to get the object's actual position,
-                    # transform to base_link via the camera's current TF
-                    # pose, and move directly to a fixed standoff from it
-                    # along the line of sight. One exact move instead of
-                    # several qualitative pan/tilt/forward guesses.
+                    # Back-project the bbox center through the depth
+                    # cloud for a precise 3D move to a fixed standoff,
+                    # instead of a qualitative pan/tilt/forward guess.
                     cx = int((best["bbox"][0] + best["bbox"][2]) / 2)
                     cy = int((best["bbox"][1] + best["bbox"][3]) / 2)
                     points_msg = node.capture_points(timeout=2.0)
@@ -1389,8 +1255,8 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
                         depth_move_done = node.move_to_pose(
                             new_xyz, new_quat, opts.group, opts.vel_scale, opts.accel_scale)
                         if depth_move_done:
-                            # Absolute move - no simple "reverse" for a
-                            # later backoff try, so don't track it as one.
+                            # Absolute move, no simple reverse for a
+                            # later backoff try - don't track it as one.
                             last_action, last_amount = None, None
                         else:
                             node.get_logger().warn(
@@ -1401,11 +1267,8 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
                 if depth_move_done:
                     pass
                 elif best is not None:
-                    # No usable depth this try (invalid/NaN at the bbox
-                    # center, or move failed) - fall back to the VLM,
-                    # which can still reason about the bbox qualitatively
-                    # (see vlm_guide's docstring for why this only works
-                    # reliably WITH a bbox to ground on).
+                    # No usable depth this try - fall back to the VLM,
+                    # which can still reason about the bbox qualitatively.
                     decision = vlm_guide(image, {
                         "step": step,
                         "investigating_candidate": cand,
@@ -1415,15 +1278,10 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
                     action, amount = decision["action"], decision["amount"]
                     reason = f"VLM move - {decision['description']}"
                 else:
-                    # Nothing detected this try - deterministic recovery
-                    # instead of asking the VLM (which has nothing to
-                    # ground on and was observed always guessing the same
-                    # fixed direction, compounding into a monotonic drift
-                    # further and further from the object rather than
-                    # searching near where it was last seen). Back off by
-                    # reversing the last move at half magnitude; with no
-                    # prior move this candidate, nudge forward slightly
-                    # instead of guessing a direction.
+                    # Nothing detected - deterministic recovery instead
+                    # of asking the VLM, which has nothing to ground on.
+                    # Back off by reversing the last move at half
+                    # magnitude; with no prior move, nudge forward.
                     if last_action is not None:
                         action = REVERSE_ACTION[last_action]
                         amount = last_amount * 0.5

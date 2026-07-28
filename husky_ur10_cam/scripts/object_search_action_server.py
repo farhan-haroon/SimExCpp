@@ -4,34 +4,21 @@
 custom_interfaces/action/FindObject.
 
 Intended caller: the STC coverage node (stc_cpp/stc_cpp/stc.py), which
-sends a goal once the mobile base arrives at a new major cell, so the arm
-searches from wherever the base currently is before coverage continues.
-Runs equally well standalone for manual testing (send a goal from the CLI
-or another node).
+sends a goal once the mobile base arrives at a new major cell. Also
+works standalone for manual testing.
 
-Goal:    target_object (YOLO/COCO class name), max_object_distance
-         (optional override, meters; <= 0 uses the script's own default).
-Feedback: phase ("phase1"/"phase2"), a human-readable status string, and
-         a running step count - a straight pass-through of run_phase1_helix
-         / run_phase2_vlm's own progress via run_full_search's feedback_cb.
-Result:  success (at least one object confirmed), found_objects[]
-         (DetectedObject: label, confidence, position in base_link,
-         description), message.
+Goal:     target_object (YOLO/COCO class name), max_object_distance
+          (optional override; <= 0 uses the script's default).
+Feedback: phase ("phase1"/"phase2"), status string, step count -
+          passed through from run_phase1_helix/run_phase2_vlm.
+Result:   success, found_objects[] (DetectedObject), message.
 
-Concurrency note: execute_callback is a plain, long-running (many
-seconds/minutes) *blocking* function - not a coroutine - and internally
-calls EnvironmentScanner methods that themselves block on nested
-rclpy.spin_once()/spin_until_future_complete() calls (image/points
-capture, IK service calls, MoveGroup action calls). For those nested
-waits to ever make progress while the top-level executor is already
-"inside" a dispatched callback, the ActionServer's own goal/cancel/result
-services and execute_callback are kept in a dedicated callback group,
-separate from the node's default group (which the inherited image/points
-subscriptions, TF listener, IK client, and MoveGroup action client all
-still use, unchanged from EnvironmentScanner). That keeps the default
-group free for nested waits to dispatch against, without needing a
-MultiThreadedExecutor. One goal at a time; cancellation isn't supported
-(the underlying search isn't structured to check for it mid-step).
+execute_callback is a long-running blocking call that internally spins
+the node via nested rclpy.spin_once()/spin_until_future_complete() (IK,
+MoveGroup, image/points capture). It runs in its own callback group,
+separate from the default group EnvironmentScanner's subscriptions/TF/
+clients use, so those nested waits can still be dispatched against
+without a MultiThreadedExecutor. One goal at a time; no cancellation.
 """
 import os
 import sys
@@ -43,12 +30,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException
 
 # ee_camera_environment_scan.py is a sibling script, not an installed
-# Python package (husky_ur10_cam only installs scripts/, not a proper
-# ament_python module) - add its directory to sys.path so it can be
-# imported directly. With --symlink-install both scripts are colocated
-# (as symlinks) in the same installed lib/husky_ur10_cam/ directory that
-# __file__ resolves to, so this works identically whether run from the
-# source tree or the installed one.
+# package - add its directory to sys.path so it can be imported directly.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ee_camera_environment_scan import (  # noqa: E402
     DEFAULT_DETECTIONS_DIR,
