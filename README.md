@@ -14,6 +14,7 @@ This README is a step-by-step path to reproducing that from a clean machine.
 ## Contents
 
 - [Quickstart](#quickstart)
+- [Configuration](#configuration)
 - [CLI reference](#cli-reference)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
@@ -94,36 +95,84 @@ tuned/tested against.)
 In a new terminal (sourced):
 
 ```bash
-ros2 run husky_ur10_cam ee_camera_environment_scan.py --objects chair
+ros2 run husky_ur10_cam ee_camera_environment_scan.py   # default: cup, book
 ```
 
 The arm sweeps its surroundings, investigates anything promising, and logs
 each confirmed find:
 
 ```
-[INFO] Phase 1 FOUND: chair (conf=0.91) at (0.82, 1.14, 0.61)
+[INFO] Phase 1 FOUND: book (conf=0.91) at (0.82, 1.14, 0.61)
 [INFO] Scan complete. Found 1 object(s):
-[INFO]   - chair (conf=0.91) at (0.82, 1.14, 0.61)
+[INFO]   - book (conf=0.91) at (0.82, 1.14, 0.61)
 [INFO] Published 1 found-object marker(s) in map frame
 ```
 
 ### 8. (Optional) Full map coverage + search
 
-Needs localization/navigation running too:
+Needs localization/navigation running too. A pre-built map of the office
+world ships in `husky_ur10_cam/maps/` (`my_map.yaml` + `my_map.pgm`):
 
 ```bash
-ros2 launch nav2_bringup localization_launch.py map:=/path/to/map.yaml
-ros2 launch nav2_bringup navigation_launch.py use_sim_time:=true
+ros2 launch nav2_bringup localization_launch.py use_sim_time:=true \
+    map:="$(ros2 pkg prefix husky_ur10_cam)/share/husky_ur10_cam/maps/my_map.yaml"
+
+# Wraps nav2_bringup's navigation_launch.py, rerouting its final velocity
+# command (published on /cmd_vel by default) to
+# /diff_drive_controller/cmd_vel_unstamped
+# - the topic ros2_control's diff_drive_controller actually listens on.
+ros2 launch husky_ur10_cam navigation.launch.py use_sim_time:=true
 
 # Action server the coverage node calls into
 ros2 run husky_ur10_cam object_search_action_server.py
 
 # Drives the base around the whole map, searching as it goes
-ros2 launch stc_cpp stc.launch.py search_objects:="chair,book,laptop" subcell_per_cell:=4
+ros2 launch stc_cpp stc.launch.py
 ```
+
+Whether coverage pauses to search is controlled by `enable_object_search`
+in `all_params.yaml` (see [Configuration](#configuration)) - `false` there
+runs plain coverage with no `FindObject` calls at all. Point `stc.launch.py`
+at your own copy of the file with `params_file:=/path/to/override.yaml` to
+change it without touching the checked-in one.
 
 Add a `MarkerArray` RViz display on `/found_objects_markers` (Fixed Frame =
 `map`) to watch finds accumulate as the robot covers the map.
+
+---
+
+## Configuration
+
+`husky_ur10_cam/config/all_params.yaml` is the single file every search and
+coverage tunable lives in - edit it, no code or launch-arg changes needed:
+
+- **`object_search_action_server.py`** loads it automatically on `ros2 run`
+  (falls back to its own code defaults if the file's missing).
+- **`stc_cpp`'s `kruskal_stc_node`** loads it via `stc.launch.py`'s
+  `params_file` argument (defaults to this file).
+
+```yaml
+object_search_action_server:
+  ros__parameters:
+    helix_radius: 0.6
+    objects: ["cup", "book"]
+    max_tries: 5
+    # ... every phase 1/phase 2 tuning knob - see the file for the full list
+
+kruskal_stc_node:
+  ros__parameters:
+    enable_object_search: true   # false = plain coverage, no FindObject calls
+    search_objects: "cup,book"
+    subcell_per_cell: 2
+```
+
+To run with a different config without touching the checked-in file, point
+either at your own copy:
+
+```bash
+ros2 run husky_ur10_cam object_search_action_server.py --ros-args --params-file /path/to/override.yaml
+ros2 launch stc_cpp stc.launch.py params_file:=/path/to/override.yaml
+```
 
 ---
 
@@ -134,7 +183,7 @@ goal parameters):
 
 | Flag | Default | Description |
 |---|---|---|
-| `--objects` | `chair` | Target class(es), space-separated, e.g. `--objects chair book laptop`. Must be YOLO/COCO classes. |
+| `--objects` | `cup book` | Target class(es), space-separated, e.g. `--objects chair book laptop`. Must be YOLO/COCO classes. |
 | `--helix-radius` / `--helix-height` | `0.6` / `1.0` | Sweep orbit radius/height around `base_link` (m). |
 | `--helix-center` | `0.0 0.0` | Orbit center `(x, y)` in `base_link`. |
 | `--tilt-up-deg` / `--tilt-down-deg` | `5.0` / `30.0` | Pitch sweep range per azimuth. |
@@ -152,13 +201,11 @@ goal parameters):
 
 Full list: `ros2 run husky_ur10_cam ee_camera_environment_scan.py --help`
 
-`stc.launch.py` args:
-
-| Arg | Default | Description |
-|---|---|---|
-| `search_objects` | `chair` | Comma-separated target class(es). |
-| `search_max_object_distance` | `0.0` | `FindObject` goal's `max_object_distance`; `<= 0.0` uses the server default. |
-| `subcell_per_cell` | `2` | Major-cell size as a multiple of the robot footprint. Raise for fewer, coarser search stops. |
+These defaults (plus `stc.launch.py`'s coverage-search params) are edited in
+`all_params.yaml` when running as a ROS node - see
+[Configuration](#configuration). `--flag` CLI args above are only for direct
+`ros2 run ee_camera_environment_scan.py` invocations, and always take
+precedence there.
 
 ---
 
@@ -201,13 +248,25 @@ TF, i.e. localization running).
 - **`/compute_ik` or `/move_action` never come up:** give `move_group` a few
   seconds after launch; if it hangs, check `ros2 node list` for a failed
   Gazebo spawn or controller further up the launch chain.
-- **STC coverage never pauses to search:** make sure
-  `object_search_action_server.py` is running — if `find_object` isn't
-  reachable within 5s, `stc.py` logs a warning and continues without
-  searching rather than blocking forever.
+- **STC coverage never pauses to search:** check `enable_object_search` in
+  `all_params.yaml` is `true` first (`false` runs plain coverage, by
+  design). If it is, make sure `object_search_action_server.py` is
+  running - if `find_object` isn't reachable within 5s, `stc.py` logs a
+  warning and continues without searching rather than blocking forever.
 - **No markers in RViz:** needs a live `map -> base_link` TF (localization
   running). Check the `MarkerArray` display's topic (`/found_objects_markers`)
   and Fixed Frame (`map`).
+- **Robot doesn't move under Nav2:** make sure you launched
+  `husky_ur10_cam navigation.launch.py`, not `nav2_bringup`'s directly -
+  it reroutes the final velocity command to
+  `/diff_drive_controller/cmd_vel_unstamped`, which is what this robot's
+  `diff_drive_controller` actually subscribes to (`use_stamped_vel: false`
+  in `merged.yaml`; Nav2's `velocity_smoother` here only ever publishes
+  plain `Twist`, not `TwistStamped`). Verify with `ros2 topic info
+  /diff_drive_controller/cmd_vel_unstamped -v` - you should see
+  `velocity_smoother` publishing and `diff_drive_controller` subscribed.
+  Controller parameters are only read at spawn time, so a config change
+  here needs the whole sim relaunched, not just Nav2.
 
 ---
 
@@ -219,8 +278,9 @@ husky_ws/src/
 │   ├── urdf/                  #   Husky+UR10+camera URDF/xacro
 │   ├── worlds/                #   Gazebo worlds (office, small house, agriculture, empty)
 │   ├── launch/                #   Sim launch files
-│   ├── config/                #   ros2_control / controller yaml
+│   ├── config/                #   ros2_control / controller yaml, all_params.yaml (search + coverage tuning)
 │   ├── models/                #   Gazebo models used to populate the worlds
+│   ├── maps/                  #   Pre-built occupancy grid map (my_map.yaml/.pgm) for the office world
 │   └── scripts/                #   Object search (CLI + action server) + IK tools
 ├── husky_ur10_moveit_config/  # MoveIt2 config for the UR10
 ├── pointcloud_concatenate_ros2/  # Merges point clouds (feeds laserscan generation)

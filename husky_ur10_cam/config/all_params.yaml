@@ -1,0 +1,57 @@
+# Single place to tune the object search + STC coverage behavior.
+#
+# object_search_action_server.py loads this automatically on `ros2 run`
+# (see main()'s _default_params_file()). stc_cpp's kruskal_stc_node
+# loads it via stc.launch.py's `params_file` argument (default: this
+# file - point it elsewhere with params_file:=/path/to/override.yaml).
+#
+# Anything left out here just falls back to the node's own code-level
+# default - see ee_camera_environment_scan.py's parse_args() and
+# stc_cpp/stc_cpp/stc.py's declare_parameter() calls.
+
+object_search_action_server:
+  ros__parameters:
+    # Phase 1 sweep geometry
+    helix_radius: 0.6          # meters, orbit radius around base_link
+    helix_height: 1.0          # meters, orbit height
+    helix_center: [0.0, 0.0]   # meters, orbit center (x, y) in base_link
+    tilt_up_deg: 5.0
+    tilt_down_deg: 30.0
+    num_sectors: 16
+    tilts_per_sector: 2
+
+    # What to look for when a FindObject goal doesn't specify its own
+    # target_objects (e.g. STC coverage using its own search_objects
+    # instead - see kruskal_stc_node below)
+    objects: ["cup", "book"]
+
+    # Phase 2 investigation budget
+    max_tries: 5
+    revisit_attempts: 3
+    phase2_max_steps: 20
+    max_object_distance: 3.0   # meters; farther candidates are skipped
+    approach_standoff: 0.15    # meters, stop this close during 3D approach
+    approach_max_step: 0.5     # meters, cap on a single 3D approach move
+
+    # Misc
+    skip_phase1: false
+    skip_phase2: false
+    skip_start_home: false
+    skip_return_home: false
+    dwell: 0.5                 # seconds to settle before each capture
+    group: "ur10_ur_manipulator"
+    vel_scale: 1.0
+    accel_scale: 1.0
+
+    # Machine-specific paths - uncomment to override the code defaults
+    # (~/husky_ws/yolov8n.pt, ~/husky_ws/detections, Qwen2.5-VL-7B-Instruct)
+    # yolo_weights: "/home/you/husky_ws/yolov8n.pt"
+    # save_detections_dir: "/home/you/husky_ws/detections"
+    # qwen_model: "Qwen/Qwen2.5-VL-7B-Instruct"
+
+kruskal_stc_node:
+  ros__parameters:
+    enable_object_search: true       # true = pause to search each new major cell
+    search_objects: "cup,book"        # comma-separated, forwarded as FindObject's target_objects
+    search_max_object_distance: 5.0   # <= 0.0 uses object_search_action_server's own default
+    subcell_per_cell: 2               # major cell size, x subcell (robot-footprint-sized)

@@ -28,6 +28,14 @@ diff_drive_controller:
     wheel_radius: 0.160
     cmd_vel_timeout: 0.5
 
+    # Humble's nav2_bringup velocity_smoother publishes plain
+    # geometry_msgs/Twist on its output topic, not TwistStamped -
+    # diff_drive_controller's default (true) expects TwistStamped on
+    # the same topic name, so with the default nothing subscribed to
+    # nav2's output actually connects (DDS won't match mismatched
+    # types even with matching topic names) and the robot never moves.
+    use_stamped_vel: false
+
     odom_frame_id: odom
     base_frame_id: base_footprint
 

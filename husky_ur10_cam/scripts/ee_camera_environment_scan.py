@@ -36,6 +36,7 @@ Usage:
 import argparse
 import math
 import os
+import signal
 import struct
 import sys
 import time
@@ -68,7 +69,7 @@ MOVE_TIMEOUT = 30.0
 
 DEFAULT_YOLO_WEIGHTS = os.path.expanduser("~/husky_ws/yolov8n.pt")
 DEFAULT_QWEN_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
-DEFAULT_OBJECT = "chair"
+DEFAULT_OBJECTS = ["cup", "book"]
 DEFAULT_DETECTIONS_DIR = os.path.expanduser("~/husky_ws/detections")
 
 VLM_ROTATION_ACTIONS = ("pan_left", "pan_right", "tilt_up", "tilt_down")
@@ -110,6 +111,19 @@ RECOVERY_JOINTS = {
     "ur10_wrist_2_joint": 0.0,
     "ur10_wrist_3_joint": 0.0,
 }
+
+
+def install_shutdown_handler():
+    """Python already turns SIGINT (Ctrl-C) into KeyboardInterrupt, but
+    SIGTERM - what `kill <pid>` sends by default, including when a launch
+    system stops this node - has no such default effect; the process just
+    dies wherever it is. Routing it through KeyboardInterrupt too means
+    run_full_search's try/finally (see below) gets a chance to return the
+    arm home either way. Doesn't help against SIGKILL (`kill -9`) - no
+    process can intercept that, by design of the OS."""
+    def _on_term(signum, frame):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, _on_term)
 
 
 def _points_topic_for(image_topic):
@@ -719,7 +733,8 @@ def _get_qwen(model_id):
     return _qwen_model, _qwen_processor
 
 
-def _save_detection_image(cv_img, detections, step, save_dir, label_hint=DEFAULT_OBJECT):
+def _save_detection_image(cv_img, detections, step, save_dir,
+                           label_hint="+".join(DEFAULT_OBJECTS)):
     """Draw a box + label/confidence for every detection onto a copy of
     the frame and save it to `save_dir` for later review. Works with an
     empty `detections` list too (just saves the plain frame). Returns
@@ -768,7 +783,8 @@ def detect_objects(image_msg, context):
     weights_path = context.get("yolo_weights", DEFAULT_YOLO_WEIGHTS)
     target_labels = context.get("target_labels")
     if target_labels is None:
-        target_labels = [context.get("target_label", DEFAULT_OBJECT)]
+        target_label = context.get("target_label")
+        target_labels = [target_label] if target_label else list(DEFAULT_OBJECTS)
     save_dir = context.get("save_detections_dir")
     model = _get_yolo(weights_path)
 
@@ -940,7 +956,7 @@ def parse_args(argv):
     p.add_argument("--helix-center", nargs=2, type=float, default=[0.0, 0.0],
                     metavar=("CX", "CY"),
                     help="Helix center (x, y) in base_link")
-    p.add_argument("--objects", nargs="+", default=[DEFAULT_OBJECT],
+    p.add_argument("--objects", nargs="+", default=list(DEFAULT_OBJECTS),
                     help="One or more objects to search for - each must be "
                          "a YOLO/COCO class name (e.g. --objects chair book "
                          "bottle). Phase 1 sweeps once, checking every "
@@ -1345,23 +1361,37 @@ def run_full_search(node, opts, feedback_cb=None):
 
     found = []
     candidates = []
-    if not opts.skip_phase1:
-        found, candidates = run_phase1_helix(node, helix_plan, opts, feedback_cb=feedback_cb)
+    try:
+        if not opts.skip_phase1:
+            found, candidates = run_phase1_helix(node, helix_plan, opts, feedback_cb=feedback_cb)
 
-    if not opts.skip_phase2:
-        found += run_phase2_vlm(node, opts, candidates, feedback_cb=feedback_cb)
+        if not opts.skip_phase2:
+            found += run_phase2_vlm(node, opts, candidates, feedback_cb=feedback_cb)
+    finally:
+        # Runs on normal completion AND on any interruption mid-search
+        # (KeyboardInterrupt from Ctrl-C/SIGTERM - see install_shutdown_
+        # handler - or an unrelated crash) so the arm is never abandoned
+        # wherever it happened to be. Each step is its own try/except so
+        # one failing (e.g. IK service down) doesn't mask the other, or
+        # swallow the original exception being propagated past this frame.
+        try:
+            node.publish_found_markers(found)
+        except Exception:
+            node.get_logger().warn("Failed to publish found-object markers during shutdown")
 
-    node.publish_found_markers(found)
-
-    if not opts.skip_return_home:
-        node.get_logger().debug("Returning to home position")
-        if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
-            node.get_logger().warn("Failed to return to home position")
+        if not opts.skip_return_home:
+            node.get_logger().debug("Returning to home position")
+            try:
+                if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
+                    node.get_logger().warn("Failed to return to home position")
+            except Exception:
+                node.get_logger().error("go_home raised during shutdown - arm may not be home")
 
     return found
 
 
 def main(args=None):
+    install_shutdown_handler()
     rclpy.init(args=args)
     argv = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
     opts = parse_args(argv)
@@ -1401,7 +1431,17 @@ def main(args=None):
         rclpy.shutdown()
         sys.exit(1)
 
-    found = run_full_search(node, opts)
+    try:
+        found = run_full_search(node, opts)
+    except KeyboardInterrupt:
+        # run_full_search's own finally already attempted to return the
+        # arm home before this propagated here - nothing left to do but
+        # exit without a traceback.
+        node.get_logger().warn("Interrupted - already attempted to return arm to home position")
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        return
 
     # Search always completes (no early stop on a find) - report every
     # confirmed object found, not just the first.

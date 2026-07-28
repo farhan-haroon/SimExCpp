@@ -99,12 +99,14 @@ class KruskalSTCNode(Node):
         # Comma-separated (not a string-array param) so it's trivially
         # settable from a launch argument, which is always a plain string
         # at the CLI (e.g. search_objects:="chair,book,laptop").
-        self.declare_parameter('search_objects', 'chair')
+        self.declare_parameter('enable_object_search', False)
+        self.declare_parameter('search_objects', 'cup,book')
         self.declare_parameter('search_max_object_distance', 0.0)
+        self.enable_object_search = self.get_parameter('enable_object_search').value
         self.search_objects = [
             s.strip() for s in self.get_parameter('search_objects').value.split(',')
             if s.strip()
-        ] or ['chair']
+        ] or ['cup', 'book']
         self.search_max_object_distance = self.get_parameter('search_max_object_distance').value
         self.current_major_cell = None
 
@@ -905,6 +907,10 @@ class KruskalSTCNode(Node):
     # reached along the coverage path, then resume to the next waypoint.
     # -------------------------
     def maybe_search_then_advance(self, idx):
+        if not self.enable_object_search:
+            self.send_next_pose(idx + 1)
+            return
+
         row, col = self.path[idx]
         major_cell = (row // self.subcell_per_cell, col // self.subcell_per_cell)
         if major_cell == self.current_major_cell:
