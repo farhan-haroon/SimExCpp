@@ -23,7 +23,7 @@ object_search_action_server:
     # What to look for when a FindObject goal doesn't specify its own
     # target_objects (e.g. STC coverage using its own search_objects
     # instead - see kruskal_stc_node below)
-    objects: ["cup", "book"]
+    objects: ["cup"]
 
     # Phase 2 investigation budget
     max_tries: 5
