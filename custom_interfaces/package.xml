@@ -3,7 +3,7 @@
 <package format="3">
   <name>custom_interfaces</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>FindObject action and DetectedObject message - the search agent's tool-call contract</description>
   <maintainer email="theoriginalhybrid9@gmail.com">farhan</maintainer>
   <license>TODO: License declaration</license>
 

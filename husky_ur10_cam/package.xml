@@ -3,7 +3,7 @@
 <package format="3">
   <name>husky_ur10_cam</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Husky+UR10 mobile manipulator sim, and the perceive-reason-act object-search agent (YOLOv8 + Qwen2.5-VL) that runs on it</description>
   <maintainer email="theoriginalhybrid9@gmail.com">farhan</maintainer>
   <license>TODO: License declaration</license>
 

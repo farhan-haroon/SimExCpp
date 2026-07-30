@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Two-phase environment scan with the UR10-mounted end-effector camera.
+"""Two-phase perceive/reason/act search agent, driving the UR10-mounted
+end-effector camera to find target objects. See object_search_action_server.py
+for the same agent exposed as a FindObject tool for an orchestrator to call.
 
 Phase 1 - fixed pan/tilt sweep, YOLO only:
     The surroundings are divided into --num-sectors azimuths (default 16,

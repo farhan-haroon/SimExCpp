@@ -1,11 +1,17 @@
-# SimExCpp — VLM+YOLO-Guided Object Search for a Husky+UR10 Mobile Manipulator
+# SimExCpp — An Agentic Object-Search System for a Husky+UR10 Mobile Manipulator
 
 A ROS 2 workspace simulating a **Clearpath Husky** carrying a **Universal
-Robots UR10** arm with a wrist-mounted RGB-D camera. The arm sweeps its
-surroundings looking for target objects (YOLOv8 + Qwen2.5-VL), and a
-spanning-tree coverage planner drives the base around the map, triggering a
-search each time it enters a new area. Every confirmed find gets an RViz
-marker at its real 3D position.
+Robots UR10** arm with a wrist-mounted RGB-D camera, built around a
+**search agent** that runs its own perceive → reason → act loop rather
+than following a scripted path: it sweeps the scene with YOLOv8, reasons
+about ambiguous detections with a vision-language model (Qwen2.5-VL) when
+geometry alone isn't enough, and directs the arm to close in and confirm.
+
+The agent is exposed as a ROS 2 action (`FindObject`) — a tool any
+orchestrator can call. Here, a spanning-tree coverage planner plays that
+role: it drives the base around the map and invokes the search agent every
+time it enters a new area, without blocking indefinitely if the agent isn't
+reachable. Every confirmed find gets an RViz marker at its real 3D position.
 
 This README is a step-by-step path to reproducing that from a clean machine.
 
@@ -16,7 +22,7 @@ This README is a step-by-step path to reproducing that from a clean machine.
 - [Quickstart](#quickstart)
 - [Configuration](#configuration)
 - [CLI reference](#cli-reference)
-- [How it works](#how-it-works)
+- [How the agent works](#how-the-agent-works)
 - [Troubleshooting](#troubleshooting)
 - [Repository layout](#repository-layout)
 
@@ -90,16 +96,16 @@ worlds are available: `husky_ur10_moveit_small_house.launch.py`,
 `husky_ur10_moveit_agriculture.launch.py` — the office world is the one
 tuned/tested against.)
 
-### 7. Run a search
+### 7. Run the search agent
 
 In a new terminal (sourced):
 
 ```bash
-ros2 run husky_ur10_cam ee_camera_environment_scan.py   # default: cup, book
+ros2 run husky_ur10_cam ee_camera_environment_scan.py   # default targets: cup, book
 ```
 
-The arm sweeps its surroundings, investigates anything promising, and logs
-each confirmed find:
+The agent sweeps its surroundings, reasons about anything promising, and
+logs each confirmed find:
 
 ```
 [INFO] Phase 1 FOUND: book (conf=0.91) at (0.82, 1.14, 0.61)
@@ -108,10 +114,12 @@ each confirmed find:
 [INFO] Published 1 found-object marker(s) in map frame
 ```
 
-### 8. (Optional) Full map coverage + search
+### 8. (Optional) Autonomous coverage + agent-driven search
 
-Needs localization/navigation running too. A pre-built map of the office
-world ships in `husky_ur10_cam/maps/` (`my_map.yaml` + `my_map.pgm`):
+The coverage planner takes over as orchestrator, invoking the search agent
+on its own as it explores. Needs localization/navigation running too. A
+pre-built map of the office world ships in `husky_ur10_cam/maps/`
+(`my_map.yaml` + `my_map.pgm`):
 
 ```bash
 ros2 launch nav2_bringup localization_launch.py use_sim_time:=true \
@@ -123,18 +131,20 @@ ros2 launch nav2_bringup localization_launch.py use_sim_time:=true \
 # - the topic ros2_control's diff_drive_controller actually listens on.
 ros2 launch husky_ur10_cam navigation.launch.py use_sim_time:=true
 
-# Action server the coverage node calls into
+# The search agent, exposed as a FindObject action server (the tool)
 ros2 run husky_ur10_cam object_search_action_server.py
 
-# Drives the base around the whole map, searching as it goes
+# The orchestrator: drives the base around the whole map, calling the
+# search agent at each new cell
 ros2 launch stc_cpp stc.launch.py
 ```
 
-Whether coverage pauses to search is controlled by `enable_object_search`
-in `all_params.yaml` (see [Configuration](#configuration)) - `false` there
-runs plain coverage with no `FindObject` calls at all. Point `stc.launch.py`
-at your own copy of the file with `params_file:=/path/to/override.yaml` to
-change it without touching the checked-in one.
+Whether the orchestrator calls the agent at all is controlled by
+`enable_object_search` in `all_params.yaml` (see
+[Configuration](#configuration)) - `false` there runs plain coverage with
+no `FindObject` calls at all. Point `stc.launch.py` at your own copy of the
+file with `params_file:=/path/to/override.yaml` to change it without
+touching the checked-in one.
 
 Add a `MarkerArray` RViz display on `/found_objects_markers` (Fixed Frame =
 `map`) to watch finds accumulate as the robot covers the map.
@@ -209,24 +219,52 @@ precedence there.
 
 ---
 
-## How it works
+## How the agent works
 
-**Phase 1 — fixed sweep.** The arm holds a fixed orbit position and steps
-through `--num-sectors` azimuths x `--tilts-per-sector` tilt angles, running
-YOLO at each stop. A confident hit is recorded as found; a weaker one is
-saved as a candidate for phase 2. The sweep always runs to completion, so
-multiple objects can be found in one pass.
+The search agent (`ee_camera_environment_scan.py`, also exposed as the
+`object_search_action_server.py` action server) runs a two-phase
+perceive → reason → act loop per invocation. Neither phase follows a fixed
+script beyond its stopping condition — each step's action depends on what
+the previous one perceived.
 
-**Phase 2 — investigate candidates.** For each saved candidate, YOLO
-re-checks the view; if still unconfirmed, the camera either moves precisely
-to a fixed standoff from the object (via depth back-projection) or, if depth
-isn't available, Qwen2.5-VL picks a qualitative pan/tilt/forward move. No
-open-ended search — only ever refines a candidate phase 1 already flagged.
+**Phase 1 — perceive: broad sweep.** The arm holds a fixed orbit position
+and steps through `--num-sectors` azimuths x `--tilts-per-sector` tilt
+angles, running YOLO at each stop. This is the agent's coverage pass over
+its own perception: a confident hit is recorded as found outright; a
+weaker one is kept as a candidate worth a closer look. The sweep always
+runs to completion, so multiple objects can surface in one pass.
 
-**STC coverage integration.** `stc_cpp`'s coverage node acts as a
-`FindObject` action client: each time it enters a new major cell, it pauses,
-sends a search goal, and resumes coverage once the search returns (or logs a
-warning and continues if the action server isn't reachable).
+**Phase 2 — reason + act: close the loop on each candidate.** For every
+candidate, the agent re-perceives (YOLO re-check) then decides how to act:
+
+- Confirmed → recorded as found, move on to the next candidate.
+- Not yet confirmed, but depth is available at the detection → **act
+  geometrically**: back-project the bounding box through the depth cloud
+  and drive the arm to a precise 3D standoff from the object. No guessing.
+- Depth unavailable or unreliable there → **act on VLM reasoning**: hand
+  the frame and the detector's bounding box to Qwen2.5-VL, which classifies
+  the object's position (LEFT/RIGHT/ABOVE/BELOW/CENTERED) and the agent
+  converts that into a pan/tilt/forward move. The VLM never decides *what*
+  was found — YOLO owns that — only *where to look next* when geometry
+  can't answer it.
+
+This repeats up to `--max-tries` per candidate, self-correcting each step
+against fresh perception rather than committing to an open-loop plan. No
+open-ended exploration — phase 2 only ever refines a candidate phase 1
+already flagged.
+
+**The agent as a tool.** `FindObject` is the agent's externally callable
+interface: any caller — the coverage planner, or you by hand via `ros2
+action send_goal` — sends a goal (target objects, optional max distance)
+and gets back streaming feedback per step plus a structured result
+(confirmed objects with 3D positions). The agent itself doesn't know or
+care who called it.
+
+**Orchestration.** `stc_cpp`'s coverage node is the orchestrator: it drives
+the base around the map and, each time it enters a new major cell, pauses
+and calls the search agent as a tool. If the agent isn't reachable within
+5s it logs a warning and resumes coverage rather than blocking forever —
+coverage always makes progress even if the agent is down.
 
 **Markers.** Every confirmed find publishes a labeled sphere on
 `/found_objects_markers` in the `map` frame (needs a live `map -> base_link`
@@ -248,8 +286,8 @@ TF, i.e. localization running).
 - **`/compute_ik` or `/move_action` never come up:** give `move_group` a few
   seconds after launch; if it hangs, check `ros2 node list` for a failed
   Gazebo spawn or controller further up the launch chain.
-- **STC coverage never pauses to search:** check `enable_object_search` in
-  `all_params.yaml` is `true` first (`false` runs plain coverage, by
+- **STC coverage never calls the search agent:** check `enable_object_search`
+  in `all_params.yaml` is `true` first (`false` runs plain coverage, by
   design). If it is, make sure `object_search_action_server.py` is
   running - if `find_object` isn't reachable within 5s, `stc.py` logs a
   warning and continues without searching rather than blocking forever.
@@ -274,33 +312,33 @@ TF, i.e. localization running).
 
 ```
 husky_ws/src/
-├── husky_ur10_cam/            # Robot description, worlds, launch files, search scripts
+├── husky_ur10_cam/            # Robot description, worlds, launch files, the search agent
 │   ├── urdf/                  #   Husky+UR10+camera URDF/xacro
 │   ├── worlds/                #   Gazebo worlds (office, small house, agriculture, empty)
 │   ├── launch/                #   Sim launch files
-│   ├── config/                #   ros2_control / controller yaml, all_params.yaml (search + coverage tuning)
+│   ├── config/                #   ros2_control / controller yaml, all_params.yaml (agent + orchestrator tuning)
 │   ├── models/                #   Gazebo models used to populate the worlds
 │   ├── maps/                  #   Pre-built occupancy grid map (my_map.yaml/.pgm) for the office world
-│   └── scripts/                #   Object search (CLI + action server) + IK tools
+│   └── scripts/                #   The search agent (CLI + action server) + IK tools
 ├── husky_ur10_moveit_config/  # MoveIt2 config for the UR10
 ├── pointcloud_concatenate_ros2/  # Merges point clouds (feeds laserscan generation)
 ├── pointcloud_to_laserscan/   # Point cloud -> 2D LaserScan for Husky navigation
-├── custom_interfaces/         # FindObject action, DetectedObject message
-└── stc_cpp/                   # Spanning-tree-coverage planner
+├── custom_interfaces/         # FindObject action, DetectedObject message - the agent's tool interface
+└── stc_cpp/                   # Spanning-tree-coverage planner, the agent's orchestrator
 ```
 
 | Package | Role |
 |---|---|
-| `husky_ur10_cam` | Robot description, Gazebo worlds, sim launch files, object-search scripts. Start here. |
+| `husky_ur10_cam` | Robot description, Gazebo worlds, sim launch files, the object-search agent. Start here. |
 | `husky_ur10_moveit_config` | MoveIt2 configuration for the UR10 arm. |
-| `custom_interfaces` | `FindObject` action and `DetectedObject` message. |
-| `stc_cpp` | Coverage path planner; drives the base and calls `FindObject` per cell. |
+| `custom_interfaces` | `FindObject` action and `DetectedObject` message - the agent's tool-call contract. |
+| `stc_cpp` | Coverage path planner; orchestrates the search agent via `FindObject` per cell. |
 | `pointcloud_concatenate_ros2` | Merges point cloud sources into one fused cloud. |
 | `pointcloud_to_laserscan` | Converts the fused cloud into a 2D `/scan` for navigation. |
 
 | Script (`husky_ur10_cam/scripts/`) | Purpose |
 |---|---|
-| `ee_camera_environment_scan.py` | Two-phase search logic + standalone CLI. |
-| `object_search_action_server.py` | Same logic as a `FindObject` action server. |
+| `ee_camera_environment_scan.py` | The search agent's perceive/reason/act logic + standalone CLI. |
+| `object_search_action_server.py` | Same agent, exposed as a `FindObject` action server (tool interface). |
 | `test_ee_pose_ik.py` | Command the camera to an arbitrary pose via `/compute_ik` (used to derive `HOME_JOINTS`). |
 | `preset_views.py` | Cycles the arm through a fixed list of preset joint poses. |

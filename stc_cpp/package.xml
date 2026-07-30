@@ -3,7 +3,7 @@
 <package format="3">
   <name>stc_cpp</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Spanning-tree coverage planner; orchestrates the husky_ur10_cam search agent via FindObject as it explores</description>
   <maintainer email="theoriginalhybrid9@gmail.com">farhan</maintainer>
   <license>TODO: License declaration</license>
 

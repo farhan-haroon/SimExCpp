@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ROS 2 action server wrapping the two-phase object search
-(ee_camera_environment_scan.py's run_full_search) as
-custom_interfaces/action/FindObject.
+"""The search agent (ee_camera_environment_scan.py's run_full_search)
+exposed as a callable tool - custom_interfaces/action/FindObject - for
+any orchestrator to invoke.
 
 Intended caller: the STC coverage node (stc_cpp/stc_cpp/stc.py), which
 sends a goal once the mobile base arrives at a new major cell. Also
