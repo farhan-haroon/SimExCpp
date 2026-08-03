@@ -1,5 +1,7 @@
 # SimExCpp — An Agentic Object-Search System for a Husky+UR10 Mobile Manipulator
 
+https://github.com/user-attachments/assets/527f9ec9-837a-4a45-9f2b-567cee19195d
+
 A ROS 2 workspace simulating a **Clearpath Husky** carrying a **Universal
 Robots UR10** arm with a wrist-mounted RGB-D camera, built around a
 **search agent** that runs its own perceive → reason → act loop rather
