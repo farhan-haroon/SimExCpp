@@ -1,6 +1,10 @@
 # SimExCpp — An Agentic Object-Search System for a Husky+UR10 Mobile Manipulator
 
+## VLM guided object detection
 https://github.com/user-attachments/assets/527f9ec9-837a-4a45-9f2b-567cee19195d
+
+## Spanning Tree based 2D coverage
+https://github.com/user-attachments/assets/ee48e1a7-ab16-4f15-8393-08e0941419d7
 
 A ROS 2 workspace simulating a **Clearpath Husky** carrying a **Universal
 Robots UR10** arm with a wrist-mounted RGB-D camera, built around a
