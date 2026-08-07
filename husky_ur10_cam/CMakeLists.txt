@@ -38,6 +38,8 @@ install(PROGRAMS
   scripts/test_ee_pose_ik.py
   scripts/ee_camera_environment_scan.py
   scripts/object_search_action_server.py
+  scripts/qwen_vlm_server.py
+  scripts/active_perception_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

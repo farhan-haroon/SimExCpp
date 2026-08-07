@@ -41,7 +41,7 @@
 
     <gazebo>
         <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
-            <parameters>$(find custom_husky)/config/control.yaml</parameters>
+            <parameters>$(find husky_ur10_cam)/config/control.yaml</parameters>
         </plugin>
     </gazebo>
 

@@ -6,6 +6,10 @@
 # Goal
 string[] target_objects                # one or more YOLO/COCO class names, e.g. ["chair", "book"]
 float32 max_object_distance 0.0        # meters; <= 0.0 means "use server default"
+string direction                       # "front_left"|"front_right"|"rear_right"|"rear_left" to
+                                        # restrict phase 1 to that 90deg quadrant, starting from
+                                        # that direction's anchor pose; "home" or "" (default) =
+                                        # full 360deg sweep from home
 ---
 # Result
 bool success                           # true if at least one object was confirmed

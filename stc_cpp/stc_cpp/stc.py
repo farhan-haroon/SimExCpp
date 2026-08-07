@@ -6,10 +6,11 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Point, PoseWithCovarianceStamped
 from nav2_msgs.action import NavigateToPose
 from custom_interfaces.action import FindObject
+from custom_interfaces.msg import ActivePerceptionHint
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Bool
 from nav_msgs.msg import OccupancyGrid, MapMetaData
 import math
 import numpy as np
@@ -91,22 +92,24 @@ class KruskalSTCNode(Node):
         self.robot_pose_y = 0.0
 
         # -------------------------
-        # Object search (FindObject action) - triggered once per major
+        # Object search (FindObject action) - considered once per major
         # cell the coverage path enters, before continuing to the next
         # waypoint. current_major_cell starts as None so the very first
-        # waypoint reached also triggers a search.
+        # waypoint reached is also considered. enable_object_search=True
+        # no longer means "always search every new cell" - it means
+        # "search when active_perception_node's latest chassis-camera hint
+        # names a direction" (see maybe_search_then_advance/_hint_callback
+        # below); a cell with no hint gets no search at all, by design.
         # -------------------------
-        # Comma-separated (not a string-array param) so it's trivially
-        # settable from a launch argument, which is always a plain string
-        # at the CLI (e.g. search_objects:="chair,book,laptop").
+        # "target_objects" - same param name object_search_action_server
+        # and active_perception_node also declare, set once in
+        # all_params.yaml's "/**" block instead of three separate copies
+        # (ROS 2's yaml parser doesn't support YAML aliases/anchors).
         self.declare_parameter('enable_object_search', False)
-        self.declare_parameter('search_objects', 'cup,book')
+        self.declare_parameter('target_objects', ['cup', 'book'])
         self.declare_parameter('search_max_object_distance', 0.0)
         self.enable_object_search = self.get_parameter('enable_object_search').value
-        self.search_objects = [
-            s.strip() for s in self.get_parameter('search_objects').value.split(',')
-            if s.strip()
-        ] or ['cup', 'book']
+        self.search_objects = list(self.get_parameter('target_objects').value) or ['cup', 'book']
         self.search_max_object_distance = self.get_parameter('search_max_object_distance').value
         self.current_major_cell = None
 
@@ -154,7 +157,22 @@ class KruskalSTCNode(Node):
         self._cb_group = ReentrantCallbackGroup()
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose', callback_group=self._cb_group)
         self.find_object_client = ActionClient(self, FindObject, 'find_object', callback_group=self._cb_group)
-        
+
+        # Active perception - latest chassis-camera scene-gate hint (see
+        # active_perception_node.py). "" means nothing promising, so
+        # maybe_search_then_advance skips the search at this cell instead
+        # of always searching every new major cell like it used to.
+        self._latest_hint_direction = ""
+        self.hint_sub = self.create_subscription(
+            ActivePerceptionHint, '/active_perception/hint',
+            self._hint_callback, 1)
+        # Paused/resumed around each FindObject call (see
+        # send_find_object_goal/find_object_*_callback below) so active_
+        # perception_node's periodic ticks don't queue behind phase 2's own
+        # VLM calls on the shared qwen_vlm_server.
+        self.active_perception_enable_pub = self.create_publisher(
+            Bool, '/active_perception/enable', 10)
+
         # -------------------------
         # Wait for map and robot pose before proceeding
         # -------------------------
@@ -903,9 +921,14 @@ class KruskalSTCNode(Node):
         self.maybe_search_then_advance(idx)
 
     # -------------------------
-    # Object search integration - run FindObject once per NEW major cell
-    # reached along the coverage path, then resume to the next waypoint.
+    # Object search integration - at each NEW major cell reached along the
+    # coverage path, check active_perception_node's latest chassis-camera
+    # hint; only call FindObject (restricted to the hinted quadrant) if it
+    # flagged one, otherwise resume straight to the next waypoint.
     # -------------------------
+    def _hint_callback(self, msg):
+        self._latest_hint_direction = msg.direction
+
     def maybe_search_then_advance(self, idx):
         if not self.enable_object_search:
             self.send_next_pose(idx + 1)
@@ -918,13 +941,22 @@ class KruskalSTCNode(Node):
             return
 
         self.current_major_cell = major_cell
-        self.get_logger().info(
-            f"Reached new major cell {major_cell} - searching for "
-            f"{self.search_objects} before continuing coverage"
-        )
-        self.send_find_object_goal(idx)
+        direction = self._latest_hint_direction
+        if not direction:
+            self.get_logger().info(
+                f"Reached new major cell {major_cell} - no active-perception "
+                f"hint, continuing coverage"
+            )
+            self.send_next_pose(idx + 1)
+            return
 
-    def send_find_object_goal(self, idx):
+        self.get_logger().info(
+            f"Reached new major cell {major_cell} - hint={direction!r}, "
+            f"searching for {self.search_objects} before continuing coverage"
+        )
+        self.send_find_object_goal(idx, direction)
+
+    def send_find_object_goal(self, idx, direction):
         if not self.find_object_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().warn(
                 "find_object action server not available - skipping search, "
@@ -933,9 +965,15 @@ class KruskalSTCNode(Node):
             self.send_next_pose(idx + 1)
             return
 
+        # Paused while a search is in progress - see the class-level note
+        # by active_perception_enable_pub's creation. Re-enabled in every
+        # terminal path below (rejection, and find_object_result_callback).
+        self.active_perception_enable_pub.publish(Bool(data=False))
+
         goal_msg = FindObject.Goal()
         goal_msg.target_objects = self.search_objects
         goal_msg.max_object_distance = float(self.search_max_object_distance)
+        goal_msg.direction = direction
 
         send_goal_future = self.find_object_client.send_goal_async(
             goal_msg, feedback_callback=self.find_object_feedback_callback)
@@ -952,6 +990,7 @@ class KruskalSTCNode(Node):
             self.get_logger().warn(
                 "find_object goal rejected - continuing coverage without searching"
             )
+            self.active_perception_enable_pub.publish(Bool(data=True))
             self.send_next_pose(idx + 1)
             return
         result_future = goal_handle.get_result_async()
@@ -968,6 +1007,7 @@ class KruskalSTCNode(Node):
                 )
         else:
             self.get_logger().info(f"  {result.message}")
+        self.active_perception_enable_pub.publish(Bool(data=True))
         self.send_next_pose(idx + 1)
 
     # -------------------------

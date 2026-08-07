@@ -26,8 +26,10 @@ Phase 2 - revisit phase 1 candidates only, YOLO confirms:
     picks one qualitative pan/tilt/forward move instead. No open-ended
     search - every move only refines a candidate phase 1 already flagged.
 
-Models: YOLOv8 (--yolo-weights) and Qwen2.5-VL-7B-Instruct (--qwen-model),
-loaded lazily and cached for the process lifetime.
+Models: YOLOv8 (--yolo-weights), loaded lazily and cached for the process
+lifetime. Phase 2's Qwen2.5-VL-7B-Instruct calls go through the shared
+qwen_vlm_server node (see vlm_guide()/EnvironmentScanner.query_vlm) instead
+of loading their own copy - qwen_vlm_server.py must be running.
 
 Usage:
     ros2 run husky_ur10_cam ee_camera_environment_scan.py
@@ -63,6 +65,7 @@ from moveit_msgs.msg import (
     PlanningOptions,
 )
 from moveit_msgs.srv import GetPositionIK
+from custom_interfaces.srv import VlmQuery
 
 PLANNING_GROUP = "ur10_ur_manipulator"
 CAMERA_FRAME = "camera_optical_link"
@@ -113,6 +116,65 @@ RECOVERY_JOINTS = {
     "ur10_wrist_2_joint": 0.0,
     "ur10_wrist_3_joint": 0.0,
 }
+
+# Active perception: one fixed joint-space anchor per chassis-camera
+# direction (husky_ur10_moveit_config/srdf/ur.srdf's front_left/
+# front_right/rear_right/rear_left group_states, copied verbatim), so a
+# direction-restricted search starts from a known-good pose facing that
+# quadrant instead of an IK solve from wherever the arm currently is.
+ANCHOR_JOINTS = {
+    "front_left": {
+        "ur10_shoulder_pan_joint": -0.0523599,
+        "ur10_shoulder_lift_joint": -2.07694,
+        "ur10_elbow_joint": 2.37365,
+        "ur10_wrist_1_joint": -3.40339,
+        "ur10_wrist_2_joint": -0.715585,
+        "ur10_wrist_3_joint": 0.0,
+    },
+    "front_right": {
+        "ur10_shoulder_pan_joint": -1.06465,
+        "ur10_shoulder_lift_joint": -2.21657,
+        "ur10_elbow_joint": 2.42601,
+        "ur10_wrist_1_joint": -3.33358,
+        "ur10_wrist_2_joint": -1.22173,
+        "ur10_wrist_3_joint": -0.0349066,
+    },
+    "rear_right": {
+        "ur10_shoulder_pan_joint": -3.56047,
+        "ur10_shoulder_lift_joint": -2.23402,
+        "ur10_elbow_joint": 2.42601,
+        "ur10_wrist_1_joint": -3.38594,
+        "ur10_wrist_2_joint": -0.436332,
+        "ur10_wrist_3_joint": 0.0349066,
+    },
+    "rear_left": {
+        "ur10_shoulder_pan_joint": -4.20624,
+        "ur10_shoulder_lift_joint": -2.26893,
+        "ur10_elbow_joint": 2.42601,
+        "ur10_wrist_1_joint": -3.33358,
+        "ur10_wrist_2_joint": -1.13446,
+        "ur10_wrist_3_joint": 0.0349066,
+    },
+}
+
+# CCW order starting from sector 0 (base_link +x/front), matching
+# generate_helix_plan's sector -> azimuth mapping (REP-103: +x forward,
+# +y left, CCW+) - also matches each anchor's own mounting corner, so the
+# quadrant a direction's chassis camera actually sees is the same quadrant
+# its phase 1 sweep restricts to.
+DIRECTION_ORDER = ("front_left", "rear_left", "rear_right", "front_right")
+
+
+def quadrant_sectors(direction, num_sectors):
+    """Sector indices covering `direction`'s 90 deg quadrant of a
+    num_sectors-sector helix sweep (None for unknown/empty direction).
+    Assumes num_sectors is a multiple of 4 - each SRDF anchor pose is 90
+    deg apart, so anything else can't partition evenly."""
+    if direction not in DIRECTION_ORDER:
+        return None
+    per_quadrant = num_sectors // 4
+    start = DIRECTION_ORDER.index(direction) * per_quadrant
+    return range(start, start + per_quadrant)
 
 
 def install_shutdown_handler():
@@ -356,6 +418,7 @@ class EnvironmentScanner(Node):
         super().__init__(node_name)
         self.ik_cli = self.create_client(GetPositionIK, "/compute_ik")
         self.move_ac = ActionClient(self, MoveGroupAction, "/move_action")
+        self.vlm_cli = self.create_client(VlmQuery, "vlm_query")
         self._latest_image = None
         self.create_subscription(Image, image_topic, self._image_cb, 1)
 
@@ -391,7 +454,29 @@ class EnvironmentScanner(Node):
 
     def wait_for_servers(self, timeout=30.0):
         return (self.ik_cli.wait_for_service(timeout_sec=timeout)
-                and self.move_ac.wait_for_server(timeout_sec=timeout))
+                and self.move_ac.wait_for_server(timeout_sec=timeout)
+                and self.vlm_cli.wait_for_service(timeout_sec=timeout))
+
+    def query_vlm(self, images, prompt, max_new_tokens=10, timeout=60.0):
+        """Blocking call to the shared qwen_vlm_server (one Qwen2.5-VL
+        instance for the whole workspace - see qwen_vlm_server.py).
+        `images` is a list of raw sensor_msgs/Image messages; the server
+        does the PIL conversion. Returns the model's raw text response, or
+        "" on timeout/failure - callers parse it themselves."""
+        req = VlmQuery.Request()
+        req.images = images
+        req.prompt = prompt
+        req.max_new_tokens = max_new_tokens
+        future = self.vlm_cli.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
+        result = future.result()
+        if result is None:
+            self.get_logger().warn(
+                f"vlm_query timed out after {timeout}s or failed - check "
+                f"qwen_vlm_server's own log (still loading? GPU busy/OOM?)"
+            )
+            return ""
+        return result.response
 
     def capture_points(self, timeout=5.0):
         """Block briefly for a fresh organized point cloud after this
@@ -653,7 +738,8 @@ class EnvironmentScanner(Node):
 
 
 def generate_helix_plan(radius, height, tilt_up_deg, tilt_down_deg,
-                         num_sectors, tilts_per_sector, center_xy=(0.0, 0.0)):
+                         num_sectors, tilts_per_sector, center_xy=(0.0, 0.0),
+                         sectors=None):
     """Sparse pan/tilt sweep around the robot's own vertical axis.
 
     `num_sectors` evenly-spaced azimuths around a fixed `radius`/`height`
@@ -661,6 +747,10 @@ def generate_helix_plan(radius, height, tilt_up_deg, tilt_down_deg,
     angles between +tilt_up_deg and -tilt_down_deg. Default 16 sectors x
     2 tilts = 32 waypoints, spaced (22.5 deg) for ~60% frame overlap given
     the ee camera's ~57 deg horizontal FOV.
+
+    `sectors`, if given, restricts the sweep to just those sector indices
+    (e.g. quadrant_sectors()'s output) instead of the full `range(num_sectors)`
+    - azimuth spacing is unchanged, only which of them get visited.
 
     Returns a list of (xyz, quat) absolute waypoints in base_link."""
     cx, cy = center_xy
@@ -676,7 +766,7 @@ def generate_helix_plan(radius, height, tilt_up_deg, tilt_down_deg,
         ]
 
     plan = []
-    for sector in range(num_sectors):
+    for sector in (sectors if sectors is not None else range(num_sectors)):
         theta = sector * sector_width
         x = cx + radius * math.cos(theta)
         y = cy + radius * math.sin(theta)
@@ -691,8 +781,6 @@ def generate_helix_plan(radius, height, tilt_up_deg, tilt_down_deg,
 
 
 _yolo_model = None
-_qwen_model = None
-_qwen_processor = None
 _cv_bridge = None
 
 
@@ -716,23 +804,6 @@ def _get_yolo(weights_path):
         from ultralytics import YOLO
         _yolo_model = YOLO(weights_path)
     return _yolo_model
-
-
-def _get_qwen(model_id):
-    global _qwen_model, _qwen_processor
-    if _qwen_model is None:
-        import torch
-        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-        # device_map="auto" (not a single fixed cuda:N) - the 7B checkpoint
-        # is ~16.6GB in bf16, which doesn't reliably fit on one 16GB card
-        # alongside whatever else is resident (Gazebo/rviz, etc). "auto"
-        # lets accelerate shard it across both GPUs as needed.
-        _qwen_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, device_map="auto",
-            local_files_only=True,
-        )
-        _qwen_processor = AutoProcessor.from_pretrained(model_id, local_files_only=True)
-    return _qwen_model, _qwen_processor
 
 
 def _save_detection_image(cv_img, detections, step, save_dir,
@@ -854,8 +925,11 @@ def _classify_to_move(text):
     }
 
 
-def vlm_guide(image_msg, context):
-    """Qwen2.5-VL-7B-Instruct move-guidance call for phase 2.
+def vlm_guide(node, image_msg, context):
+    """Qwen2.5-VL-7B-Instruct move-guidance call for phase 2, via the
+    shared qwen_vlm_server (node.query_vlm) - see EnvironmentScanner.
+    query_vlm and qwen_vlm_server.py. Model selection is now the server's
+    concern (its own qwen_model ROS param), not this call's.
 
     The VLM never decides whether the object is present - YOLO does
     that. This only ever picks ONE move to get a better look at a
@@ -879,14 +953,10 @@ def vlm_guide(image_msg, context):
     Returns:
         {"action": str, "amount": float, "description": str}
     """
-    import torch
-
-    model_id = context.get("qwen_model", DEFAULT_QWEN_MODEL)
     candidate = context["investigating_candidate"]
     target_label = candidate["label"]
     bbox = context["detector_bbox"]
 
-    model, processor = _get_qwen(model_id)
     pil_image = _image_msg_to_pil(image_msg)
     img_w, img_h = pil_image.size
 
@@ -917,23 +987,7 @@ def vlm_guide(image_msg, context):
         f"CENTERED - it is already roughly centered (both close to 50%)"
     )
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image", "image": pil_image},
-            {"type": "text", "text": prompt},
-        ],
-    }]
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = processor(text=[text], images=[pil_image], return_tensors="pt").to(model.device)
-
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=10, do_sample=False)
-    gen = out[:, inputs["input_ids"].shape[1]:]
-    response = processor.batch_decode(gen, skip_special_tokens=True)[0]
-
+    response = node.query_vlm([image_msg], prompt, max_new_tokens=10)
     return _classify_to_move(response)
 
 
@@ -971,8 +1025,6 @@ def parse_args(argv):
     p.add_argument("--save-detections-dir", default=DEFAULT_DETECTIONS_DIR,
                     help="Directory to save bounding-box-overlaid images for "
                          "every target-label detection. Empty string disables saving.")
-    p.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL,
-                    help="HF model id/path for phase 2 VLM reasoning")
     p.add_argument("--max-tries", type=int, default=5,
                     help="Per-candidate budget: VLM-guided moves + YOLO "
                          "re-checks before giving up on a candidate and "
@@ -1013,6 +1065,13 @@ def parse_args(argv):
                          "(can't rule them in or out)")
     p.add_argument("--dry-run", action="store_true",
                     help="Print the phase 1 helix waypoints without commanding the robot")
+    p.add_argument("--direction", default="", choices=["", "home", *ANCHOR_JOINTS],
+                    help="Restrict phase 1 to one chassis-camera quadrant, "
+                         "starting from that direction's SRDF anchor pose, "
+                         "instead of a full 360deg sweep from home. \"\" and "
+                         "\"home\" both mean full sweep from home (\"home\" is "
+                         "just active perception's EE-camera-triggered variant, "
+                         "logged distinctly) - see object_search_action_server.py")
     return p.parse_args(argv)
 
 
@@ -1102,7 +1161,7 @@ def run_phase1_helix(node, plan, opts, feedback_cb=None):
                 continue
 
             dist_str = f", ~{dist:.1f}m" if dist is not None else ""
-            node.get_logger().info(
+            node.get_logger().debug(
                 f"Phase 1 candidate: {det.get('label', '?')} "
                 f"(conf={conf:.2f}{dist_str}) at {loc} -> phase 2"
             )
@@ -1264,7 +1323,7 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
                             max_step=opts.approach_max_step)
                         dist = math.sqrt(sum((o - c) ** 2 for o, c in
                                               zip(object_xyz, camera_xyz)))
-                        node.get_logger().info(
+                        node.get_logger().debug(
                             f"Phase 2 candidate {cand_idx + 1}, try {try_idx + 1}: "
                             f"3D approach - object at "
                             f"{tuple(round(v, 3) for v in object_xyz)} in base_link, "
@@ -1287,10 +1346,9 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
                 elif best is not None:
                     # No usable depth this try - fall back to the VLM,
                     # which can still reason about the bbox qualitatively.
-                    decision = vlm_guide(image, {
+                    decision = vlm_guide(node, image, {
                         "step": step,
                         "investigating_candidate": cand,
-                        "qwen_model": opts.qwen_model,
                         "detector_bbox": best["bbox"],
                     })
                     action, amount = decision["action"], decision["amount"]
@@ -1310,7 +1368,7 @@ def run_phase2_vlm(node, opts, candidates=None, feedback_cb=None):
                         reason = "deterministic default - no detection yet, nudging closer"
 
                 if not depth_move_done:
-                    node.get_logger().info(
+                    node.get_logger().debug(
                         f"Phase 2 candidate {cand_idx + 1}, try {try_idx + 1}: "
                         f"{action}({amount:.3f}) - {reason}"
                     )
@@ -1349,17 +1407,39 @@ def run_full_search(node, opts, feedback_cb=None):
     Returns the list of found detection dicts (each with a
     "position_base_link"), possibly empty. Does not init/shutdown rclpy
     or touch the node's lifecycle - callers own that."""
+    direction = opts.direction
+    sectors = None
+    if direction in ANCHOR_JOINTS:
+        sectors = quadrant_sectors(direction, opts.num_sectors)
+        node.get_logger().debug(
+            f"Direction-restricted search ({direction}): moving to its "
+            f"anchor pose instead of home, sweeping quadrant only"
+        )
+        if not node.execute_joints(ANCHOR_JOINTS[direction], opts.group,
+                                    opts.vel_scale, opts.accel_scale):
+            node.get_logger().warn(
+                f"Failed to reach {direction} anchor pose - quadrant sweep "
+                f"will start from wherever the arm currently is"
+            )
+    else:
+        # "" (no hint/manual default), "home" (active perception's EE-
+        # camera-view answer - already full-sweep-shaped, nothing to
+        # restrict), or an unrecognized value - all fall back to the same
+        # safe default: full 360deg sweep from home.
+        if direction and direction != "home":
+            node.get_logger().warn(f"Unknown direction {direction!r} - full sweep from home")
+        if not opts.skip_start_home:
+            node.get_logger().debug("Moving to home position before starting")
+            if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
+                node.get_logger().warn("Failed to reach home position before starting")
+
     helix_plan = generate_helix_plan(
         opts.helix_radius, opts.helix_height,
         opts.tilt_up_deg, opts.tilt_down_deg,
         opts.num_sectors, opts.tilts_per_sector,
         center_xy=tuple(opts.helix_center),
+        sectors=sectors,
     )
-
-    if not opts.skip_start_home:
-        node.get_logger().debug("Moving to home position before starting")
-        if not node.go_home(opts.group, opts.vel_scale, opts.accel_scale):
-            node.get_logger().warn("Failed to reach home position before starting")
 
     found = []
     candidates = []
@@ -1410,6 +1490,7 @@ def main(args=None):
         opts.tilt_up_deg, opts.tilt_down_deg,
         opts.num_sectors, opts.tilts_per_sector,
         center_xy=tuple(opts.helix_center),
+        sectors=quadrant_sectors(opts.direction, opts.num_sectors) if opts.direction else None,
     )
     print(f"Phase 1 sweep plan: {len(helix_plan)} waypoints "
           f"({opts.num_sectors} sectors x {opts.tilts_per_sector} tilts, "
@@ -1426,7 +1507,7 @@ def main(args=None):
 
     node = EnvironmentScanner(opts.image_topic, opts.points_topic)
 
-    print("Waiting for /compute_ik and /move_action...")
+    print("Waiting for /compute_ik, /move_action and vlm_query...")
     if not node.wait_for_servers(30.0):
         node.get_logger().error("MoveIt servers not available")
         node.destroy_node()

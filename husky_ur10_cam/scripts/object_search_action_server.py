@@ -49,9 +49,14 @@ from custom_interfaces.msg import DetectedObject  # noqa: E402
 # (fixed at construction, before parameters can be read) and
 # yolo_weights/save_detections_dir/qwen_model (machine-specific paths,
 # left to their code-level defaults unless explicitly added to the yaml).
+# "objects" isn't here either - it's declared separately below as
+# "target_objects", the name shared with kruskal_stc_node and
+# active_perception_node via all_params.yaml's "/**" block (ROS 2's yaml
+# parser doesn't support YAML aliases, so this is the one place all three
+# read the same list from).
 TUNABLE_PARAMS = [
     "helix_radius", "helix_height", "tilt_up_deg", "tilt_down_deg",
-    "num_sectors", "tilts_per_sector", "helix_center", "objects",
+    "num_sectors", "tilts_per_sector", "helix_center",
     "max_tries", "revisit_attempts", "phase2_max_steps",
     "max_object_distance", "approach_standoff", "approach_max_step",
     "skip_phase1", "skip_phase2", "skip_start_home", "skip_return_home",
@@ -69,6 +74,7 @@ class ObjectSearchActionServer(EnvironmentScanner):
         defaults = parse_args([])
         for name in TUNABLE_PARAMS:
             self.declare_parameter(name, getattr(defaults, name))
+        self.declare_parameter("target_objects", defaults.objects)
 
         self._action_group = MutuallyExclusiveCallbackGroup()
         self._action_server = ActionServer(
@@ -82,9 +88,11 @@ class ObjectSearchActionServer(EnvironmentScanner):
         opts = parse_args([])  # fills in the fields TUNABLE_PARAMS doesn't cover
         for name in TUNABLE_PARAMS:
             setattr(opts, name, self.get_parameter(name).value)
-        opts.objects = list(goal.target_objects) if goal.target_objects else list(opts.objects)
+        opts.objects = (list(goal.target_objects) if goal.target_objects
+                         else list(self.get_parameter("target_objects").value))
         if goal.max_object_distance > 0.0:
             opts.max_object_distance = goal.max_object_distance
+        opts.direction = goal.direction  # "" = full 360deg sweep, as before
 
         if opts.save_detections_dir:
             run_id = time.strftime("%Y%m%d_%H%M%S")
@@ -93,7 +101,8 @@ class ObjectSearchActionServer(EnvironmentScanner):
 
         self.get_logger().info(
             f"FindObject goal accepted: objects={opts.objects!r}, "
-            f"max_object_distance={opts.max_object_distance}m"
+            f"max_object_distance={opts.max_object_distance}m, "
+            f"direction={opts.direction!r}"
         )
 
         def feedback_cb(phase, message, step):
@@ -152,7 +161,7 @@ def main(args=None):
     rclpy.init(args=argv)
     node = ObjectSearchActionServer()
 
-    node.get_logger().info("Waiting for /compute_ik and /move_action...")
+    node.get_logger().info("Waiting for /compute_ik, /move_action and vlm_query...")
     if not node.wait_for_servers(30.0):
         node.get_logger().error("MoveIt servers not available - exiting")
         node.destroy_node()
@@ -161,7 +170,7 @@ def main(args=None):
 
     node.get_logger().info(
         "FindObject action server ready (default objects: "
-        f"{node.get_parameter('objects').value}, "
+        f"{node.get_parameter('target_objects').value}, "
         f"detections dir: {DEFAULT_DETECTIONS_DIR})")
     try:
         rclpy.spin(node)

@@ -352,97 +352,113 @@
     <child link="velodyne"/>
   </joint>
 
-  <link name="chassis_camera_mount">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <cylinder radius="0.005" length="0.10"/>
-      </geometry>
-      <material name="white"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <cylinder radius="0.005" length="0.10"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <mass value="1.0"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0"
-               iyy="0.01" iyz="0.0"
-               izz="0.01"/>
-    </inertial>
-  </link>
-  <gazebo reference="chassis_camera_mount">
-    <material>Gazebo/White</material>
-  </gazebo>
-  <joint name="chassis_camera_mount_joint" type="fixed">
-    <origin xyz="${chassis_length/2 - 0.05} 0 ${chassis_height/2}" rpy="0 0 0"/>
-    <parent link="base_link"/>
-    <child link="chassis_camera_mount"/>
-  </joint>
+  <!-- Active perception: 4 radially-outward depth cameras at the chassis
+       corners, one per direction of the SRDF's front_left/front_right/
+       rear_right/rear_left arm anchor poses (husky_ur10_moveit_config/
+       srdf/ur.srdf), tilted slightly up so they see over nearby clutter.
+       active_perception_node periodically checks all 4 to decide whether
+       coverage should pause to search, and if so, in which direction -
+       gated to only within max_check_distance_m (default 3m) via each
+       one's /points cloud, same as the existing chassis_camera stub
+       pattern's depth type. -->
+  <xacro:macro name="chassis_corner_camera" params="name x y yaw_deg tilt_up_deg:=15">
+    <link name="chassis_cam_${name}_mount">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="0.005" length="0.10"/>
+        </geometry>
+        <material name="white"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="0.005" length="0.10"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="1.0"/>
+        <inertia ixx="0.01" ixy="0.0" ixz="0.0"
+                 iyy="0.01" iyz="0.0"
+                 izz="0.01"/>
+      </inertial>
+    </link>
+    <gazebo reference="chassis_cam_${name}_mount">
+      <material>Gazebo/White</material>
+    </gazebo>
+    <joint name="chassis_cam_${name}_mount_joint" type="fixed">
+      <origin xyz="${x} ${y} ${chassis_height/2}" rpy="0 0 ${yaw_deg*pi/180}"/>
+      <parent link="base_link"/>
+      <child link="chassis_cam_${name}_mount"/>
+    </joint>
 
-  <link name="chassis_camera">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.02 0.10 0.02"/>
-      </geometry>
-      <material name="orange"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.02 0.10 0.02"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <mass value="1.0"/>
-      <inertia ixx="0.05" ixy="0.0" ixz="0.0"
-               iyy="0.05" iyz="0.0"
-               izz="0.05"/>
-    </inertial>
-  </link>
-  <joint name="chassis_camera_joint" type="fixed">
-    <origin xyz="0 0 0.05" rpy="0 0 0"/>
-    <parent link="chassis_camera_mount"/>
-    <child link="chassis_camera"/>
-  </joint>
+    <link name="chassis_cam_${name}">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.02 0.10 0.02"/>
+        </geometry>
+        <material name="orange"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.02 0.10 0.02"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="1.0"/>
+        <inertia ixx="0.05" ixy="0.0" ixz="0.0"
+                 iyy="0.05" iyz="0.0"
+                 izz="0.05"/>
+      </inertial>
+    </link>
+    <joint name="chassis_cam_${name}_joint" type="fixed">
+      <origin xyz="0 0 0.05" rpy="0 -${tilt_up_deg*pi/180} 0"/>
+      <parent link="chassis_cam_${name}_mount"/>
+      <child link="chassis_cam_${name}"/>
+    </joint>
 
-  <link name="chassis_camera_optical"/>
-  <joint name="chassis_camera_optical_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="-${pi/2} 0 -${pi/2}"/>
-    <parent link="chassis_camera"/>
-    <child link="chassis_camera_optical"/>
-  </joint>
+    <link name="chassis_cam_${name}_optical"/>
+    <joint name="chassis_cam_${name}_optical_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="-${pi/2} 0 -${pi/2}"/>
+      <parent link="chassis_cam_${name}"/>
+      <child link="chassis_cam_${name}_optical"/>
+    </joint>
 
-  <gazebo reference="chassis_camera">
-    <material>Gazebo/Orange</material>
-    <sensor name="chassis_depth_camera" type="depth">
-      <always_on>true</always_on>
-      <visualize>true</visualize>
-      <update_rate>15</update_rate>
-      <pose>0 0 0 0 0 0</pose>
-      <depth_camera name="chassis_depth_cam">
-        <horizontal_fov>2</horizontal_fov>
-        <image>
-          <width>320</width>
-          <height>240</height>
-          <format>R8G8B8</format>
-        </image>
-        <clip>
-          <near>0.1</near>
-          <far>10.0</far>
-        </clip>
-      </depth_camera>
-      <plugin name="chassis_depth_camera_driver" filename="libgazebo_ros_camera.so">
-        <frame_name>chassis_camera_optical</frame_name>
-        <camera_name>chassis_camera</camera_name>
-      </plugin>
-    </sensor>
-  </gazebo>
+    <gazebo reference="chassis_cam_${name}">
+      <material>Gazebo/Orange</material>
+      <sensor name="chassis_cam_${name}_sensor" type="depth">
+        <always_on>true</always_on>
+        <visualize>true</visualize>
+        <update_rate>15</update_rate>
+        <pose>0 0 0 0 0 0</pose>
+        <depth_camera name="chassis_cam_${name}">
+          <horizontal_fov>2</horizontal_fov>
+          <image>
+            <width>320</width>
+            <height>240</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>10.0</far>
+          </clip>
+        </depth_camera>
+        <plugin name="chassis_cam_${name}_driver" filename="libgazebo_ros_camera.so">
+          <frame_name>chassis_cam_${name}_optical</frame_name>
+          <camera_name>chassis_cam_${name}</camera_name>
+        </plugin>
+      </sensor>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:chassis_corner_camera name="front_left"  x="${chassis_length/2 - 0.05}"  y="${chassis_width/2 - 0.03}"  yaw_deg="45"/>
+  <xacro:chassis_corner_camera name="front_right" x="${chassis_length/2 - 0.05}"  y="-${chassis_width/2 - 0.03}" yaw_deg="-45"/>
+  <xacro:chassis_corner_camera name="rear_left"   x="-${chassis_length/2 - 0.05}" y="${chassis_width/2 - 0.03}"  yaw_deg="135"/>
+  <xacro:chassis_corner_camera name="rear_right"  x="-${chassis_length/2 - 0.05}" y="-${chassis_width/2 - 0.03}" yaw_deg="-135"/>
 
   <!-- IMU -->
   <link name="imu_link"/>

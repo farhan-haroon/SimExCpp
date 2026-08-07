@@ -1,0 +1,8 @@
+# Generic VLM inference passthrough served by qwen_vlm_server - callers
+# build their own prompt and parse their own response; the server only
+# ever runs one model call and returns its raw text.
+sensor_msgs/Image[] images
+string prompt
+int32 max_new_tokens 10
+---
+string response

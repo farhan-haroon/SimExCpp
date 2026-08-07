@@ -477,6 +477,343 @@
     <child link="velodyne2"/>
   </joint>
 
+  <link name="chassis_cam_front_left_mount">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+  </link>
+  <gazebo reference="chassis_cam_front_left_mount">
+    <material>Gazebo/White</material>
+  </gazebo>
+  <joint name="chassis_cam_front_left_mount_joint" type="fixed">
+    <origin rpy="0 0 0.7853981633974483" xyz="0.375 0.18 0.121"/>
+    <parent link="base_link"/>
+    <child link="chassis_cam_front_left_mount"/>
+  </joint>
+  <link name="chassis_cam_front_left">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.05" ixy="0.0" ixz="0.0" iyy="0.05" iyz="0.0" izz="0.05"/>
+    </inertial>
+  </link>
+  <joint name="chassis_cam_front_left_joint" type="fixed">
+    <origin rpy="0 -0.2617993877991494 0" xyz="0 0 0.05"/>
+    <parent link="chassis_cam_front_left_mount"/>
+    <child link="chassis_cam_front_left"/>
+  </joint>
+  <link name="chassis_cam_front_left_optical"/>
+  <joint name="chassis_cam_front_left_optical_joint" type="fixed">
+    <origin rpy="-1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0"/>
+    <parent link="chassis_cam_front_left"/>
+    <child link="chassis_cam_front_left_optical"/>
+  </joint>
+  <gazebo reference="chassis_cam_front_left">
+    <material>Gazebo/Orange</material>
+    <sensor name="chassis_cam_front_left_sensor" type="depth">
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+      <update_rate>15</update_rate>
+      <pose>0 0 0 0 0 0</pose>
+      <depth_camera name="chassis_cam_front_left">
+        <horizontal_fov>2</horizontal_fov>
+        <image>
+          <width>320</width>
+          <height>240</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.1</near>
+          <far>10.0</far>
+        </clip>
+      </depth_camera>
+      <plugin filename="libgazebo_ros_camera.so" name="chassis_cam_front_left_driver">
+        <frame_name>chassis_cam_front_left_optical</frame_name>
+        <camera_name>chassis_cam_front_left</camera_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+  <link name="chassis_cam_front_right_mount">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+  </link>
+  <gazebo reference="chassis_cam_front_right_mount">
+    <material>Gazebo/White</material>
+  </gazebo>
+  <joint name="chassis_cam_front_right_mount_joint" type="fixed">
+    <origin rpy="0 0 -0.7853981633974483" xyz="0.375 -0.18 0.121"/>
+    <parent link="base_link"/>
+    <child link="chassis_cam_front_right_mount"/>
+  </joint>
+  <link name="chassis_cam_front_right">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.05" ixy="0.0" ixz="0.0" iyy="0.05" iyz="0.0" izz="0.05"/>
+    </inertial>
+  </link>
+  <joint name="chassis_cam_front_right_joint" type="fixed">
+    <origin rpy="0 -0.2617993877991494 0" xyz="0 0 0.05"/>
+    <parent link="chassis_cam_front_right_mount"/>
+    <child link="chassis_cam_front_right"/>
+  </joint>
+  <link name="chassis_cam_front_right_optical"/>
+  <joint name="chassis_cam_front_right_optical_joint" type="fixed">
+    <origin rpy="-1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0"/>
+    <parent link="chassis_cam_front_right"/>
+    <child link="chassis_cam_front_right_optical"/>
+  </joint>
+  <gazebo reference="chassis_cam_front_right">
+    <material>Gazebo/Orange</material>
+    <sensor name="chassis_cam_front_right_sensor" type="depth">
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+      <update_rate>15</update_rate>
+      <pose>0 0 0 0 0 0</pose>
+      <depth_camera name="chassis_cam_front_right">
+        <horizontal_fov>2</horizontal_fov>
+        <image>
+          <width>320</width>
+          <height>240</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.1</near>
+          <far>10.0</far>
+        </clip>
+      </depth_camera>
+      <plugin filename="libgazebo_ros_camera.so" name="chassis_cam_front_right_driver">
+        <frame_name>chassis_cam_front_right_optical</frame_name>
+        <camera_name>chassis_cam_front_right</camera_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+  <link name="chassis_cam_rear_left_mount">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+  </link>
+  <gazebo reference="chassis_cam_rear_left_mount">
+    <material>Gazebo/White</material>
+  </gazebo>
+  <joint name="chassis_cam_rear_left_mount_joint" type="fixed">
+    <origin rpy="0 0 2.356194490192345" xyz="-0.375 0.18 0.121"/>
+    <parent link="base_link"/>
+    <child link="chassis_cam_rear_left_mount"/>
+  </joint>
+  <link name="chassis_cam_rear_left">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.05" ixy="0.0" ixz="0.0" iyy="0.05" iyz="0.0" izz="0.05"/>
+    </inertial>
+  </link>
+  <joint name="chassis_cam_rear_left_joint" type="fixed">
+    <origin rpy="0 -0.2617993877991494 0" xyz="0 0 0.05"/>
+    <parent link="chassis_cam_rear_left_mount"/>
+    <child link="chassis_cam_rear_left"/>
+  </joint>
+  <link name="chassis_cam_rear_left_optical"/>
+  <joint name="chassis_cam_rear_left_optical_joint" type="fixed">
+    <origin rpy="-1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0"/>
+    <parent link="chassis_cam_rear_left"/>
+    <child link="chassis_cam_rear_left_optical"/>
+  </joint>
+  <gazebo reference="chassis_cam_rear_left">
+    <material>Gazebo/Orange</material>
+    <sensor name="chassis_cam_rear_left_sensor" type="depth">
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+      <update_rate>15</update_rate>
+      <pose>0 0 0 0 0 0</pose>
+      <depth_camera name="chassis_cam_rear_left">
+        <horizontal_fov>2</horizontal_fov>
+        <image>
+          <width>320</width>
+          <height>240</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.1</near>
+          <far>10.0</far>
+        </clip>
+      </depth_camera>
+      <plugin filename="libgazebo_ros_camera.so" name="chassis_cam_rear_left_driver">
+        <frame_name>chassis_cam_rear_left_optical</frame_name>
+        <camera_name>chassis_cam_rear_left</camera_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+  <link name="chassis_cam_rear_right_mount">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.10" radius="0.005"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+  </link>
+  <gazebo reference="chassis_cam_rear_right_mount">
+    <material>Gazebo/White</material>
+  </gazebo>
+  <joint name="chassis_cam_rear_right_mount_joint" type="fixed">
+    <origin rpy="0 0 -2.356194490192345" xyz="-0.375 -0.18 0.121"/>
+    <parent link="base_link"/>
+    <child link="chassis_cam_rear_right_mount"/>
+  </joint>
+  <link name="chassis_cam_rear_right">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.10 0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.05" ixy="0.0" ixz="0.0" iyy="0.05" iyz="0.0" izz="0.05"/>
+    </inertial>
+  </link>
+  <joint name="chassis_cam_rear_right_joint" type="fixed">
+    <origin rpy="0 -0.2617993877991494 0" xyz="0 0 0.05"/>
+    <parent link="chassis_cam_rear_right_mount"/>
+    <child link="chassis_cam_rear_right"/>
+  </joint>
+  <link name="chassis_cam_rear_right_optical"/>
+  <joint name="chassis_cam_rear_right_optical_joint" type="fixed">
+    <origin rpy="-1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0"/>
+    <parent link="chassis_cam_rear_right"/>
+    <child link="chassis_cam_rear_right_optical"/>
+  </joint>
+  <gazebo reference="chassis_cam_rear_right">
+    <material>Gazebo/Orange</material>
+    <sensor name="chassis_cam_rear_right_sensor" type="depth">
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+      <update_rate>15</update_rate>
+      <pose>0 0 0 0 0 0</pose>
+      <depth_camera name="chassis_cam_rear_right">
+        <horizontal_fov>2</horizontal_fov>
+        <image>
+          <width>320</width>
+          <height>240</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.1</near>
+          <far>10.0</far>
+        </clip>
+      </depth_camera>
+      <plugin filename="libgazebo_ros_camera.so" name="chassis_cam_rear_right_driver">
+        <frame_name>chassis_cam_rear_right_optical</frame_name>
+        <camera_name>chassis_cam_rear_right</camera_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
   <link name="imu_link"/>
   <joint name="imu_joint" type="fixed">
     <origin rpy="0 0 0" xyz="0 0 0"/>
